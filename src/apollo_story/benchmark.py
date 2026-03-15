@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import gc
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from .config import save_yaml
+from .data import build_dataloaders
+from .optimizers import build_optimizer
+from .train import _autocast_context, build_model, profile_memory_breakdown
+from .utils import append_jsonl, bytes_to_gb, ensure_dir, resolve_device, set_seed, write_json
+
+
+def _cleanup(device: torch.device) -> None:
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+def _is_oom(exc: RuntimeError) -> bool:
+    return "out of memory" in str(exc).lower()
+
+
+def _synthetic_batch(batch_size: int, seq_len: int, vocab_size: int, device: torch.device) -> dict[str, torch.Tensor]:
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+    return {"input_ids": input_ids, "labels": input_ids.clone()}
+
+
+def _event_timers(device: torch.device):
+    if device.type == "cuda":
+        return torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    return None, None
+
+
+def _time_block(device: torch.device, fn) -> float:
+    if device.type == "cuda":
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize(device)
+        return start.elapsed_time(end) / 1000.0
+    start = time.perf_counter()
+    fn()
+    return time.perf_counter() - start
+
+
+def _measure_at_batch_size(
+    config: dict[str, Any],
+    batch_size: int,
+    warmup_steps: int,
+    measure_steps: int,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    device = resolve_device(config["training"].get("device", "auto"))
+    model = build_model(config).to(device)
+    optimizer = build_optimizer(model, config)
+    precision = config["training"]["mixed_precision"]
+    synthetic = config["benchmark"].get("synthetic", True)
+    step_trace_path = output_dir / "step_times.jsonl" if output_dir is not None else None
+
+    if synthetic:
+        def next_batch():
+            return _synthetic_batch(
+                batch_size,
+                config["dataset"]["sequence_length"],
+                config["model"]["vocab_size"],
+                device,
+            )
+    else:
+        train_loader, _, _ = build_dataloaders(config)
+        iterator = iter(train_loader)
+
+        def next_batch():
+            nonlocal iterator
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                iterator = iter(train_loader)
+                batch = next(iterator)
+            return {key: value.to(device) for key, value in batch.items()}
+
+    try:
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+
+        for _ in range(warmup_steps):
+            batch = next_batch()
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast_context(device, precision):
+                loss = model(**batch)["loss"]
+            loss.backward()
+            optimizer.step()
+
+        step_times = []
+        total_tokens = 0
+        total_elapsed = 0.0
+        if step_trace_path is not None and step_trace_path.exists():
+            step_trace_path.unlink()
+
+        for step in range(1, measure_steps + 1):
+            batch = next_batch()
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast_context(device, precision):
+                loss = model(**batch)["loss"]
+
+            backward_time = _time_block(device, loss.backward)
+            opt_time = _time_block(device, optimizer.step)
+
+            step_time = backward_time + opt_time
+            total_elapsed += step_time
+            total_tokens += batch["input_ids"].numel()
+            record = {
+                "step": step,
+                "backward_time_s": backward_time,
+                "optimizer_step_time_s": opt_time,
+                "step_time_s": step_time,
+            }
+            step_times.append(record)
+            if step_trace_path is not None:
+                append_jsonl(step_trace_path, record)
+
+        peak_memory_gb = bytes_to_gb(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0.0
+        budget = config["benchmark"].get("memory_budget_gb")
+        if budget is not None and peak_memory_gb > budget:
+            raise RuntimeError(f"Exceeded logical memory budget: {peak_memory_gb:.2f} GB > {budget:.2f} GB")
+
+        summary = {
+            "max_batch_size": batch_size,
+            "tokens_per_second": total_tokens / max(total_elapsed, 1e-12),
+            "avg_step_time_s": total_elapsed / max(measure_steps, 1),
+            "peak_memory_gb": peak_memory_gb,
+            "avg_backward_time_s": sum(x["backward_time_s"] for x in step_times) / max(measure_steps, 1),
+            "avg_optimizer_step_time_s": sum(x["optimizer_step_time_s"] for x in step_times) / max(measure_steps, 1),
+        }
+
+        if config["benchmark"].get("profile_memory", False):
+            batch = next_batch()
+            summary["memory_breakdown"] = profile_memory_breakdown(model, optimizer, batch, device, precision)
+
+        del model, optimizer
+        _cleanup(device)
+        return summary
+    except RuntimeError:
+        _cleanup(device)
+        raise
+
+
+def _find_max_batch_size(config: dict[str, Any]) -> int:
+    bench_cfg = config["benchmark"]
+    best = 0
+    current = bench_cfg["initial_batch_size"]
+    cap = bench_cfg["batch_size_cap"]
+
+    while current <= cap:
+        try:
+            _measure_at_batch_size(config, current, warmup_steps=1, measure_steps=1)
+            best = current
+            current *= 2
+        except RuntimeError as exc:
+            if not _is_oom(exc):
+                raise
+            break
+
+    low = best + 1
+    high = min(cap, current - 1 if current > best else cap)
+    while low <= high:
+        mid = (low + high) // 2
+        try:
+            _measure_at_batch_size(config, mid, warmup_steps=1, measure_steps=1)
+            best = mid
+            low = mid + 1
+        except RuntimeError as exc:
+            if not _is_oom(exc):
+                raise
+            high = mid - 1
+    return best
+
+
+def benchmark_experiment(config: dict[str, Any]) -> dict[str, Any]:
+    set_seed(config["seed"])
+    device = resolve_device(config["training"].get("device", "auto"))
+    output_dir = ensure_dir(Path(config["output_root"]) / config["experiment_name"])
+    save_yaml(output_dir / "config.yaml", config)
+    max_batch_size = _find_max_batch_size(config)
+    if max_batch_size < 1:
+        raise RuntimeError("Could not fit even a single batch. Reduce the model or sequence length.")
+    summary = _measure_at_batch_size(
+        config,
+        batch_size=max_batch_size,
+        warmup_steps=config["benchmark"]["warmup_steps"],
+        measure_steps=config["benchmark"]["measure_steps"],
+        output_dir=output_dir,
+    )
+    summary["experiment_name"] = config["experiment_name"]
+    summary["device"] = str(device)
+    summary["memory_budget_gb"] = config["benchmark"].get("memory_budget_gb")
+    write_json(output_dir / "benchmark_summary.json", summary)
+    return summary

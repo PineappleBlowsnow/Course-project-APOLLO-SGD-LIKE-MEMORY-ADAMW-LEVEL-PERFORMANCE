@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apollo-story"
+version = "0.1.0"
+description = "nanoGPT-style APOLLO/GaLore/AdamW reproduction scaffold for poster experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "datasets>=2.20.0",
+  "matplotlib>=3.8.0",
+  "pandas>=2.2.0",
+  "pyyaml>=6.0.1",
+  "seaborn>=0.13.0",
+  "sentencepiece>=0.2.0",
+  "torch>=2.3.0",
+  "tqdm>=4.66.0",
+  "transformers>=4.45.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

@@ -1,0 +1,85 @@
+seed: 42
+output_root: results
+experiment_name: base
+run_kind: train
+
+dataset:
+  name: wikitext
+  config_name: wikitext-2-raw-v1
+  train_split: train
+  eval_split: validation
+  text_field: text
+  tokenizer_name: gpt2
+  cache_dir: null
+  max_train_examples: null
+  max_eval_examples: null
+  sequence_length: 256
+  num_proc: 2
+  num_workers: 2
+
+model:
+  vocab_size: 50257
+  block_size: 256
+  n_layer: 12
+  n_head: 12
+  n_embd: 768
+  dropout: 0.1
+  bias: true
+
+training:
+  device: auto
+  batch_size: 8
+  grad_accum_steps: 4
+  max_steps: 3000
+  learning_rate: 0.0006
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  momentum: 0.9
+  eps: 1.0e-8
+  warmup_steps: 100
+  min_lr_ratio: 0.1
+  max_grad_norm: 1.0
+  mixed_precision: bf16
+  compile: false
+  log_interval: 10
+  eval_interval: 100
+  eval_batches: 50
+  save_interval: 1000
+  save_analysis_steps: [100, 250, 500]
+  timing_window_steps: 500
+
+optimizer:
+  name: adamw
+  rank_ratio: 0.25
+  rank: null
+  granularity: channel
+  projection: random
+  projection_update_gap: 200
+  scale: 1.0
+  norm_limiter: true
+  norm_limiter_gamma: 1.01
+
+analysis:
+  track_param_names:
+    - transformer.h.0.attn.c_attn.weight
+    - transformer.h.0.attn.c_proj.weight
+    - transformer.h.0.mlp.c_fc.weight
+    - transformer.h.0.mlp.c_proj.weight
+  scaling_log_steps: [100, 500, 1000, 2000, 3000]
+  enable_scaling_trace: false
+  enable_memory_profile: false
+  enable_step_timing: true
+  enable_sharpness_online: false
+  sharpness_steps: [50, 100, 250, 500]
+  sharpness_num_batches: 1
+
+benchmark:
+  enabled: false
+  synthetic: true
+  initial_batch_size: 2
+  batch_size_cap: 64
+  warmup_steps: 10
+  measure_steps: 50
+  memory_budget_gb: null
+  profile_memory: true
+

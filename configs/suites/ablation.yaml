@@ -1,0 +1,66 @@
+suite_name: ablation
+shared_config: configs/base.yaml
+
+experiments:
+  - name: galore_rank_32
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: galore
+        rank: 32
+
+  - name: galore_rank_8
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: galore
+        rank: 8
+
+  - name: galore_rank_1
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: galore
+        rank: 1
+
+  - name: apollo_rank_32
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: apollo
+        rank: 32
+        granularity: channel
+
+  - name: apollo_rank_8
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: apollo
+        rank: 8
+        granularity: channel
+
+  - name: apollo_channel_rank_1
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: apollo
+        rank: 1
+        granularity: channel
+        scale: 8.0
+
+  - name: apollo_mini_rank_1
+    overrides:
+      training:
+        max_steps: 1500
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        scale: 64.0
+

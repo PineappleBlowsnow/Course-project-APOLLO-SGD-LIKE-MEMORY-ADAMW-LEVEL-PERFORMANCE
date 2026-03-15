@@ -1,0 +1,1614 @@
+                                                      APOLLO: SGD- LIKE M EMORY, A DAM W- LEVEL P ERFORMANCE
+
+
+                                                 Hanqing Zhu * 1 2 Zhenyu Zhang * 1 Wenyan Cong 1 Xi Liu 2 Sem Park 2 Vikas Chandra 2 Bo Long 2
+                                                                        David Z. Pan ✝ 1 Zhangyang Wang ✝ 1 Jinwon Lee ✝ 2
+
+                                                                                                  A BSTRACT
+                                                 Large language models (LLMs) demonstrate remarkable capabilities but are notoriously memory-intensive during
+arXiv:2412.05270v4 [cs.LG] 17 Feb 2025
+
+
+
+
+                                                 training, particularly with the popular AdamW optimizer. This memory burden often necessitates using more or
+                                                 higher-end GPUs or reducing batch sizes, limiting training scalability and throughput, respectively. To address this,
+                                                 various memory-efficient optimizers have been proposed to reduce optimizer memory usage. However, they face
+                                                 key challenges: (i) reliance on costly SVD operations (e.g., GaLore, Fira); (ii) significant performance trade-offs
+                                                 compared to AdamW (e.g., Flora); and (iii) still substantial memory overhead of optimization states in order to
+                                                 maintain competitive performance (e.g., 1/4 rank in GaLore, and full-rank first momentum in Adam-mini).
+                                                 In this work, we investigate the redundancy in AdamW’s learning rate adaption rule and identify that it can be
+                                                 coarsened as a structured learning rate update (channel-wise or tensor-wise). Based on this insight, we propose
+                                                 a novel approach, Approximated Gradient Scaling for Memory Efficient LLM Optimization (APOLLO), which
+                                                 approximate the channel-wise learning rate scaling with an auxiliary low-rank optimizer state based on pure
+                                                 random projection. The structured learning rate update rule makes APOLLO highly tolerant to further memory
+                                                 reduction with lower rank, halving the rank while delivering similar pre-training performance. We further propose
+                                                 an extreme memory-efficient version, APOLLO-Mini, which utilizes tensor-wise scaling with only a rank-1
+                                                 auxiliary sub-space, achieving SGD-level memory cost but superior pre-training performance than Adam(W).
+                                                 We conduct extensive experiments across different model architectures and tasks, showing that APOLLO series
+                                                 performs generally on-par with, or even better than Adam(W). Meanwhile, APOLLO achieves even greater
+                                                 memory savings than GaLore, by almost eliminating the optimization states in AdamW. These savings translate
+                                                 into significant system benefits: (1) Enhanced Throughput: APOLLO and APOLLO-Mini achieve around 3×
+                                                 throughput on an 8×A100-80GB setup compared to AdamW by fully utilizing memory to support 4× larger
+                                                 batch sizes. (2) Improved Model Scalability: APOLLO-Mini for the first time enables pre-training LLaMA-13B
+                                                 model with naive DDP on A100-80G without requiring other system-level optimizations. (3) Low-End GPU
+                                                 Friendly Pre-training: Combined with quantization, the APOLLO series for the first time enables the training of
+                                                 LLaMA-7B from scratch on a single GPU using less than 12 GB of memory.
+                                                                            Website:  https://zhuhanqing.github.io/APOLLO
+                                                                            Code:  https://github.com/zhuhanqing/APOLLO
+
+
+                                         1       I NTRODUCTION                                               robust optimization techniques, with the Adam(W) opti-
+                                                                                                             mizer (Kingma & Ba, 2014; Loshchilov, 2017) emerging as
+                                         Large Language Models (LLMs) have achieved remarkable               the de-facto standard for stabilizing LLM training (Zhang
+                                         progress across various domains (Brown et al., 2020; Kocoń         et al., 2024a) by tracking both first-order and second-order
+                                         et al., 2023; Dubey et al., 2024), largely due to substantial       moments. Despite its effectiveness, Adam(W) incurs signif-
+                                         increases in model size, now reaching billions of param-            icant memory overhead, as maintaining both moments ef-
+                                         eters. Training these high-dimensional models demands               fectively triples the memory required relative to the model’s
+                                            Equal contribution ✝ Co-advising to this work 1 Department of
+                                             *                                                               parameter size. This results in excessive memory consump-
+                                         Electrical and Computer Engineering, The University of Texas at     tion for the optimizer, even with a single batch. For instance,
+                                         Austin 2 AI at Meta; Work was done during Hanqing’s internship at   training a LLaMA-7B model from scratch requires at least
+                                         Meta. Correspondence to: David Z, Pan <dpan@ece.utexas.edu>,        58 GB of memory, with 28 GB devoted to AdamW’s op-
+                                         Zhangyang Wang <atlaswang@utexas.edu>, Jinwon Lee <jin-
+                                         wonl@meta.com>.
+                                                                                                             timizer states (Zhao et al., 2024). For larger models like
+                                                                                                             GPT-3, with 175 billion parameters, memory demands reach
+                                         Proceedings of the 8 th MLSys Conference, Santa Clara, CA, USA,     700 GB for the model alone, leading to a staggering 1.4 TB
+                                         2025. Copyright 2025 by the author(s).                              requirement for AdamW’s optimizer states.
+                                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+                                                                                Memory comparison                   Throughput on 8A100-80GB
+                       Weight
+                                                                                                                                  BS=16       BS=16
+                                                               AdamW
+                                      Backward
+
+                      Gradient                                 GaLore
+                                                                                                                               BS=8        BS=8
+                      Low-rank Update optimizer              APOLLO
+                      gradient
+                                                                                                                 BS=4
+                                                         APOLLO-Mini
+              AdamW                  Update weight
+
+                                                      (Q-) APOLLO-Mini                                                  BS=8
+                       Low-rank
+                                                                                                                        OOM
+                      weight updte
+                                                                                                                  AdamW         APOLLO    APOLLO-Mini
+
+
+
+Figure 1. (Left) Overview of our APOLLO optimizer; (Middle) Memory breakdown comparison for a single batch size, where both GaLore
+and our method employ the layer-wise gradient update strategy (Lv et al., 2023). The (Q-) prefix indicates the integration of INT8 weight
+quantization, as utilized in (Zhang et al., 2024c); (Right) End-to-end training throughput on 8 A100-80GB GPUs.
+
+                                                                                       methods, GaLore (Zhao et al., 2024) stands out, enabling
+                                                                                       full-parameter training of LLMs by performing low-rank
+                                                                                       gradient updates through Singular Value Decomposition
+                                          AdamW
+                                                                                       (SVD). Fira (Chen et al., 2024) enhances GaLore by incor-
+                                        Half-Month Training Time Constraint
+                                                                                       porating the error residual between the full-rank gradient
+                                                                                       and its low-rank approximation, effectively simulating full-
+                                                                                       rank updates. LDAdam (Robert et al., 2024) also integrates a
+                                                               APOLLO (-Mini)
+                                                                                       generalized error feedback mechanism to explicitly account
+                                     GaLore                                            for the compression of gradient and optimizer states.
+                                                                                       However, the periodic updates to the gradient subspace via
+                                                                                       SVD (e.g., every 200 iterations) incurs a computational cost
+Figure 2. Comparison of Validation perplexity on LLaMA-7B.                             of O(mn2 ), prohibitive when the matrix dimensions, m and
+                                                                                       n, are large, as is the case with LLMs. For instance, in
+This excessive optimizer memory usage poses significant                                the case of the LLaMA-7B model, a single subspace up-
+challenges in training large-scale LLMs. It compels the                                date can take approximately 10 minutes, whereas inference
+community to either use more and higher-end GPUs, or to                                only takes seconds. This substantial overhead significantly
+reduce batch sizes. However, scaling training clusters intro-                          reduces training throughput, as demonstrated in Fig. 9. Sev-
+duce highly non-trivial communication and infrastructure                               eral GaLore variants, therefore, explore replacing the SVD
+overheads (Jiang et al., 2024); smaller batch sizes come                               projection with online PCA (Liang et al., 2024) or random
+at the cost of training throughput; and high-end GPUs are                              projections (He et al., 2024), yielding provable convergence.
+often inaccessible to researchers with limited resources.
+                                                                                       In contrast, the recently proposed Adam-mini (Zhang et al.,
+Significant research efforts have focused on addressing the                            2024b) demonstrates that a block-wise second moment V
+high memory costs of training LLMs. One approach in-                                   suffices for learning rate adjustments, offering an orthogonal
+volves reducing the parameter volume through methods                                   and more efficient alternative. However, achieving perfor-
+such as designing smaller-scale LLMs (Liu et al., 2024b;                               mance on par with AdamW requires careful handling of
+Tang et al., 2024), employing sparse model training (Liu                               different model components to maintain compatibility with
+et al., 2022; Thangarasa et al., 2023), and leveraging low-                            its optimization dynamics.
+rank adaptation (Hu et al., 2021). Although these techniques
+                                                                                       In this paper, we effectively integrate the two idea streams
+effectively reduce memory usage, they restrict the optimiza-
+                                                                                       of low-rank approximation and optimizer state redundancy,
+tion space of model parameters and often result in perfor-
+                                                                                       introducing a unified framework that achieves significant
+mance trade-offs (Biderman et al., 2024), particularly during
+                                                                                       memory savings (below GaLore and its variants & close to
+pretraining (Lialin et al., 2023).
+                                                                                       SGD) while maintaining or surpassing the performance of
+Another avenue of research focuses on designing memory-                                Adam(W). Our key observation is that AdamW’s element-
+efficient optimizers that reduce memory consumption while                              wise learning rate update rule can be effectively restructured
+achieving performance on par with Adam(W). This in-                                    into a channel-wise or even tensor-wise format, where each
+cludes exploring redundancy in optimizer states (Zhang                                 channel or tensor shares the same gradient scaling factor.
+et al., 2024b) and leveraging low-rank properties (Zhao                                To enable this structured gradient scaling, we introduce
+et al., 2024; Chen et al., 2024). Among low-rank-based
+                                  APOLLO: SGD-like Memory, AdamW-level Performance
+
+a memory-efficient approximation for the scaling factors         we set a new record for memory efficiency: pre-training
+using an auxiliary optimizer state, requiring only lower-        a LLaMA 7B model requires only 12GB of memory (Fig. 1
+dimensional gradient information as input. This signifi-         (middle)). More information can be found in Section 5.3.
+cantly reduces memory usage by leveraging a compressed           These results establish APOLLO and APOLLO-Mini as
+representation of the gradient information. Additionally, we     highly efficient and scalable solutions for both pre-training
+eliminate the need for costly SVD-based low-rank projec-         and fine-tuning of LLMs, offering compelling improve-
+tions by adopting an SVD-free method based on random             ments in performance, memory usage, and throughput.
+projections. We show that a much lower rank, or even a
+rank-1 approximation, is sufficient to capture the struc-        2   R ELATED W ORK
+tured gradient scaling factors effectively. This innovation
+allows for a simpler and more efficient training process with-   2.1 Algorithm-Level Memory-Efficient Training
+out compromising performance. Our new memory-efficient           Numerous algorithmic improvements have been introduced
+optimizer for LLM training, named Approximated Gradient          to tackle the substantial memory overhead in training LLMs.
+Scaling for Memory Efficient LLM Optimization (APOLLO),          One category focuses on reducing the number of trainable
+not only achieves better performance than AdamW but also         parameters to save memory costs. This includes approaches
+delivers greater memory savings compared to GaLore.              such as developing high-quality, small-scale models (Liu
+Our key contributions are as follows:                            et al., 2024b; Tang et al., 2024), introducing sparsity dur-
+                                                                 ing training (Liu et al., 2022; Thangarasa et al., 2023), and
+   • Structured Learning Rate Update for LLM Train-              implementing low-rank adaptation (Hu et al., 2021). While
+     ing: We show that structured learning rate updates,         these methods are effective at reducing memory usage, they
+     such as channel-wise or tensor-wise scaling, are suffi-     often fall short in achieving comparable performance, espe-
+     cient for LLM training. This addresses redundancy in        cially in pre-training scenarios for large models.
+     AdamW’s element-wise learning rate update rule and          Another avenue of research targets advancements in optimiz-
+     reduces computational overhead.                             ers, as exemplified by works such as GaLore (Zhao et al.,
+   • Approximated Channel-wise Gradient Scaling in a             2024), Fira (Chen et al., 2024), Flora (Hao et al., 2024),
+     Low-Rank Auxiliary Space (APOLLO): We propose               Adam-mini (Zhang et al., 2024b), GaLore-mini (Huang
+     a practical and memory-efficient method to approxi-         et al.), LDAdam (Robert et al., 2024), GoLore (He et al.,
+     mate channel-wise gradient scaling factors in an aux-       2024), and LoQT (Loeschcke et al.). These approaches have
+     iliary low-rank space using pure random projections.        made notable progress but still face significant challenges.
+     APOLLO achieves superior performance to AdamW,              Some methods rely on computationally expensive SVD op-
+     even with lower-rank approximations, while maintain-        erations (e.g., GaLore and Fira), although recent research
+     ing excellent memory efficiency.                            shows that random projections can effectively compress gra-
+   • Minimal-Rank Tensor-wise Gradient Scaling                   dients during later training stages while still requiring SVD
+     (APOLLO-Mini): For extreme memory efficiency,               early on (He et al., 2024). Others either exhibit noticeable
+     we introduce APOLLO-Mini, which applies tensor-             performance gaps compared to AdamW, or demand substan-
+     wise gradient scaling using only a rank-1 auxiliary         tial memory overhead to maintain competitive performance,
+     sub-space. APOLLO-Mini achieves SGD-level mem-              as seen in GaLore’s 1/4 rank requirement and Adam-mini’s
+     ory costs while outperforming AdamW, demonstrating          reliance on full-rank first momentum.
+     the effectiveness of our approach.                          In contrast, APOLLO achieves efficient memory usage en-
+We demonstrate the efficacy of the APOLLO series in both         tirely without relying on SVD while delivering performance
+pre-training and fine-tuning scenarios. In pre-training,         that matches or even surpasses AdamW. Moreover, our ex-
+across a range of LLaMA model sizes from 60M to 7B               treme variant, APOLLO-Mini, drives memory costs down
+parameters, APOLLO and APOLLO-Mini consistently out-             to SGD levels while maintaining or exceeding the perfor-
+perform AdamW, achieving up to a 2.8 reduction in val-           mance of AdamW, setting a new benchmark for memory-
+idation perplexity while significantly reducing memory           efficient optimization.
+overhead by eliminating nearly all optimizer states. In
+fine-tuning, APOLLO and APOLLO-Mini achieve perfor-              2.2 System-Level Memory Efficiency Optimization
+mance on par with full fine-tuning. Beyond these perfor-         Several system-level techniques have been developed to re-
+mance gains, the APOLLO series offers practical system-          duce memory usage in LLM training (Chen et al., 2016; Ren
+level advantages, including: (i) 3× better throughput on         et al., 2021). Activation checkpointing (Chen et al., 2016)
+pre-training LLaMA 7B ( Fig.1 (right) and the 7B exper-          recomputes activations during backward instead of storing
+iments in Fig.2); (2) Extreme training memory savings.           them for the whole training iteration, reducing memory re-
+By combining APOLLO-Mini with weight quantization,               quirements. Quantization (Dettmers et al., 2024) reduces
+                                   APOLLO: SGD-like Memory, AdamW-level Performance
+
+memory requirements by utilizing lower bit data formats.          In other words, the effectiveness of AdamW can be viewed
+Memory offloading (Zhang et al., 2023; Ren et al., 2021)          as the result of a variance-aware learning rate schedule
+reduces GPU memory consumption by leveraging non-GPU              per element in raw gradient Gt using the corresponding
+memory. Our method, APOLLO, is orthogonal to these                element in S, where elements with higher variance in Vt
+system-level optimizations and can be seamlessly integrated       are scaled down to reduce unstable updates. While this
+to achieve greater memory efficiency. Furthermore, by elim-       reformulation is very straightforward, it paves the way for
+inating the need for SVD, APOLLO is more system-friendly,         subsequent analysis. It also provides a convenient strategy
+requiring only a cheap general matrix multiplication to com-      to analyze other momentum algorithms through “SGD-like”
+plete the projection step.                                        lens (e.g., all reduced to adaptive SGD learning rates).
+
+3     C OARSENED L EARNING R ATE U PDATE                          3.2   Coarsening Element-wise Learning Rate
+                                                                        Adjustment in a Structured Manner
+      RULE I S E NOUGH FOR LLM S
+                                                                  While the element-wise learning rate update rule in AdamW
+In this section, we first revisit the Adam(W) (Kingma &
+                                                                  is effective, it can be overly sensitive to noisy gradients in
+Ba, 2014; Loshchilov, 2017) and reformulate it as an adap-
+                                                                  specific parameters, especially in high-dimensional models
+tive learning rate algorithm without explicit momentum
+                                                                  like large language models (LLMs). Recent work, such as
+term (Section 3.1). Then, we propose that the element-wise
+                                                                  Adam-mini (Zhang et al., 2024b), proposes grouping pa-
+learning rate update rule can be coarsened with a structured
+                                                                  rameters into blocks and applying a block-wise learning
+channel-wise learning rate adaptation strategy, with even
+                                                                  rate adjustment to reduce memory usage while maintain-
+slightly better model performance by empirical verification.
+                                                                  ing on-par performance as Adam(W). However, the block-
+                                                                  wise approach in Adam-mini (Zhang et al., 2024b) requires
+3.1   Reformulating AdamW as a Pure Adaptive                      carefully chosen block sizes for different modules in Trans-
+      Learning Rate Algorithm                                     formers and only achieves memory savings for the second
+Vanilla AdamW update rule. AdamW has established                  moments, leaving the first moment memory unaffected.
+itself as the go-to optimizer for Transformer training, lever-
+aging both first moment (the mean of past gradients) and          A more structured learning rate update rule. Inspired
+second moment (the variance of past gradients) to adjust up-      by findings of optimizer redundancy, we propose an effec-
+dates. This dual momentum-based approach has proven su-           tive simplification by coarsening the element-wise adaptive
+perior to purely first-order optimizers like SGD (Zhang et al.,   learning rate rule in equation 2 into a structured channel-
+2024a). Disregarding weight decay, the vanilla AdamW up-          wise adaptation. We group parameters based on the larger
+date rule is as follows:                                          dimension of the weight tensors. The element-wise scaling
+                                                                  factor S = G̃
+                                                                              Gt is then simplified into a channel-wise format
+                                                                                t
+At time step t, given a weight matrix W ∈ Rm×n (m ≤ n)                    1×n
+with gradient Gt = −∇W ϕt (Wt ), the standard AdamW               ,s∈R        , where each element sj for each channel j is:
+update rule is defined as:
+                                                                                               ∥G̃t [:, j]∥2
+                                            Mt                                          sj =                                 (3)
+        Wt+1 = Wt − η · G̃t ,       G̃t = √                (1)                                 ∥Gt [:, j]∥2
+                                            Vt + ϵ
+Here, η is the learning rate and ϵ is a small constant for        where ∥ · ∥2 denotes the ℓ2 norm. Then, the final gradient
+numerical stability. The first and second moment, Mt and          scaling rule becomes G̃t = S · Gt = Gt · diag(s).
+Vt , are computed as exponentially weighted averages:             As suggested by the authors of concurrent work Fira (Chen
+              Mt = β1 Mt−1 + (1 − β1 )Gt                          et al., 2024), our channel-wise approximation of the element-
+                                                                                                G̃t
+                                                                  wise gradient scaling rule G      shares a similar format the
+               Vt = β2 Vt−1 + (1 − β2 )G2t                                                        t
+                                                                  scaling factor in the Fira, which is used for normalizing the
+                                                                  error residual between low-rank GaLore and full-rank gra-
+where β1 , β2 ∈ [0, 1) are the exponential decay rates.
+                                                                  dients. While our approach shares a similar mathematical
+                                                                  form, as being a straightforward computation of ℓ2 -norm ra-
+Viewing AdamW as an adaptive learning rate algorithm
+                                                                  tios, it originates from a fundamentally distinct perspective.
+without momentum. The above update rule in equation 1
+                                                                  We argue that the element-wise gradient scaling rule in equa-
+can then be reformulate as an element-wise gradient scaling
+                                                                  tion 2 is unnecessarily fine-grained and can be effectively
+rule with a gradient scaling factor S = G̃
+                                         Gt ∈ R
+                                           t     m×n
+                                                       over       replaced with structured channel-wise or tensor-wise adap-
+the raw gradient Gt , i.e.,                                       tation. In contrast, Fira seeks to normalize the error residual
+                                     G̃t                          between low-rank GaLore updates and full-rank updates
+                Wt+1 = Wt − η ·          · Gt              (2)    based on the observation that channel-wise gradient norm
+                                     Gt
+                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+ratios between low-rank and full-rank optimizers are inher-
+ently similar. Our method, however, establishes a different
+finding: the low-rank approximated channel-wise gradient
+scaling factor, G̃
+                                                    p
+                Gt , follows a predictable ratio of
+                   t
+                                                     r/n (see
+Theorem A.4) compared to full-rank optimization, which                                 Spike due to early-stage
+differs fundamentally from Fira’s observations.                                           unstable gradient
+                                                                                                       Similar loss at end
+Empirical validation. We first empirically explore the ef-
+fectiveness of the proposed update rule where we compared
+the training loss of the original element-wise learning rate
+adaptation with our proposed channel-wise adaptation on
+a LLaMA-130M model. As shown in Figure 3, both ap-
+proaches achieve similar loss reduction over training steps,        Figure 3. Training loss comparison between Element-wise and
+demonstrating that the structured adaptation effectively            Channel-wise Learning Rate (LR) Adaptations with or without
+                                                                    norm limiter (NL) on the LLaMA-130M model.
+maintains performance. In fact, the channel-wise adaptation
+achieves slightly better perplexity 24.43 (AdamW: 25.08),            Question ①: Can structured learning rate adaptation be
+further supporting the effectiveness of our approach. How-           converted into practical, memory-efficient optimization?
+ever, we notice that our channel-wise learning rate adaption
+(orange curve) shows a significant spike at the early stage,
+                                                                    4.1     APOLLO: Approximate Structural Gradient
+which is due to the unstable gradient at the early stage. In-
+                                                                            Scaling for LLM Optimization
+stead of applying the vanilla gradient clipping method, we
+use the Norm-growth Limiter (NL) in (Chen et al., 2024) to
+limit the consecutive gradient growth, as it is shown slightly      4.1.1    Approximating Gradient Scaling with an Auxiliary
+more effective than gradient clipping:                                       Low-Rank Space
+                                                                    To address this challenge, we propose APOLLO, which
+             ||G̃t ||                  G̃t
+      if              > γ then G̃t ←          · γ||G̃t−1 ||   (4)   approximates the channel-wise gradient scaling in a com-
+           ||G̃t−1 ||                ||G̃t ||                       pressed low-rank space rather than the original full-rank one,
+where γ is a threshold to ensure that the rate of gradient          showing in Algorithm 1. Specifically, an auxiliary low-rank
+growth remains controlled. This approach limits the magni-          optimizer state is stored by taking the low-rank gradient Rt
+tude of gradient norm increases, particularly for the unstable      as input, which is computed as Rt = Pt Gt ∈ Rr×n , using
+gradients in the early stages, thereby preventing loss spikes       a pre-defined projection matrix Pt ∈ Rr×m .
+(green curve), leading to further better perplexity 24.11. We,      The auxiliary optimizer state will only maintain the low-rank
+by default, use the NL in our method and set γ = 1.01.              version of the first and second moments as:
+ Takeaways ①: A structured learning rate update is suffi-                           MR       R
+                                                                                     t = β1 Mt−1 + (1 − β1 )Rt
+ cient for LLM training.                                                                      R
+                                                                                    VtR = β2 Vt−1 + (1 − β2 )R2t
+This observation suggests that effective optimization can be        These low-rank moments, MR            R
+                                                                                                 t and Vt , are then converted
+achieved by applying adaptive learning rates at a coarser           into a lightweight, channel-wise scaling factors:
+granularity, such as channel-wise, rather than at the element-
+                                                                                    ∥R̃t [:, j]∥2                MR
+wise level. This insight forms the basis for the memory-                     sR
+                                                                              j =                 , where R̃t = p t           (5)
+efficient methods we propose in the next section.                                   ∥Rt [:, j]∥2                 VtR + ϵ
+
+                                                                    In this way, APOLLO estimates the channel-wise gradient
+4    APOLLO: A PPROXIMATED G RADIENT                                scaling factor s with the auxiliary low-rank optimizer state,
+     S CALING FOR M EMORY E FFICIENT                                saving memory from 2mn to 2nr. We will show later that
+     LLM O PTIMIZATION                                              the coarse-grained channel-wise scaling makes APOLLO in-
+                                                                    sensitive to low rank, unlike GaLore, which needs relatively
+From observation to practical Benefit. While coarsen-
+                                                                    high rank to retain performances (typically, one-quarter of
+ing gradient scaling factors is effective, it does not inherently
+                                                                    the original dimension), leading to great memory saving.
+reduce optimizer memory usage. Computing structured gra-
+                                                                    Details can be found at Section 5.4, A3.
+dient scaling factors still requires access to the full optimizer
+states Mt and Vt , which consume significant memory. This           However, since APOLLO operates in a compressed domain
+brings us to a critical question:                                   (i.e. low-rank space), a key question remains:
+                                   APOLLO: SGD-like Memory, AdamW-level Performance
+
+Algorithm 1 AdamW with APOLLO/APOLLO-Mini                          We demonstrate that random projection can effectively
+  Input: A weight matrix W ∈ Rm×n with m ≤ n. Step                 bound the difference between the gradient scaling factor in
+  size η, scale factor α, decay rates {β1 , β2 }, weight decay     the compact and original space in equation 6:
+  λ, rank r, subspace update frequency T .
+                                                                                             ∥G̃t [:, j]∥         Mt
+  Initialize: t ← 0                                                   Original space: sj =                , G̃t = √
+  repeat                                                                                     ∥Gt [:, j]∥            Vt
+                                                                                                                            (6)
+     # Step 1: Calculate gradient into low rank space.                                    ∥R̃R
+                                                                                             t [:, j]∥         MRt
+                                                                      Compact space: sR
+                                                                                      j =              , R̃R
+                                                                                                           t = p R
+     Gt ∈ Rm×n ← −∇W ϕt (Wt )                                                             ∥Rt [:, j]∥           Vt
+     if t mod T = 0 then
+          Pt ← Nseed (0, 1/r)                                      with all small ϵ in the denominators removed for simplicity.
+        seed ← an independent new random seed
+                                                                   Generating random projection matrix. We generate the
+     end if
+                                                                   random projection matrix P by sampling each element from
+     Rt ← Pt Gt
+                                                                   a standard Gaussian distribution. With high probability, pro-
+     # Step 2: Obtain low rank optimization states, Mt , Vt .
+                                                                   jection using a random Gaussian matrix largely preserves
+     MR       R
+         t , Vt ← AdamW(R          t , β1 , β2 , λ = 0)
+                R
+                    p
+                         R                                         the scaled norm from the original space based on the John-
+     R̃t ← Mt /( Vt + ϵ)
+                                                                   son–Lindenstrauss lemma (JLT) (Freksen, 2021).
+     # Step 3: Obtain approximated gradient scaling factor.
+     if APOLLO then
+                                                    ∥R̃t [:,j]∥2   First-order moment ratio bounding. We expand the
+          S ← diag(sR     R          R       R
+                     0 , s1 , ..., sm ) {si = ∥Rt [:,j]∥2 }        computation formula of the first moment recursively, as:
+     else if APOLLO-Mini then
+                            ∥R̃t ∥2
+          S ← sR {sR = ∥R       t ∥2
+                                     }                                     Mt = β1 Mt−1 + (1 − β1 )Gt
+     end if                                                                                            t−1
+                                                                                                       X                    (7)
+     # Step 4: Update weight in original space.                                 = β1t M0 + (1 − β1 )         β1k Gt−k
+      Wt ← Wt−1 + η · α · Gt S − η · λWt−1                                                      k=0
+                                                                           R       R
+     t←t+1                                                                Mt = β1 Mt−1 + (1 − β1 )Rt
+  until convergence criteria met                                                                       t−1
+                                                                                                       X                    (8)
+  return WT                                                                    = β1t MR
+                                                                                      0 + (1 − β1 )          β1k Rt−k
+                                                                                                       k=0
+
+                                                                   where β1 < 1.
+ Question ②: Can the adaptive learning rate in the com-
+ pressed space effectively approximate its behavior in the         We quantify the approximation error in the following theo-
+ original space?                                                   rem.
+                                                                   Theorem 4.1. Approximated Channel-wise Momentum
+Moreover, what type of low-rank projection method is ideal         with a bound for its ℓ2 norm: Gt ∈ Rm×n is the full-rank
+for this purpose? The default choice might be Singular Value       gradient (m ≤ n). Let P be a matrix of shape Rr×m where
+Decomposition (SVD), as it captures the most informative           each element is independently sampled from a standard
+components of the gradient. In fact, most existing low-rank        Gaussian distribution in the variance of 1/r. With the pro-
+optimizers for LLMs rely on SVD-based approximations to            jected gradient Rt = PGt , we have the projected gradient
+maintain accuracy, especially during pre-training. However,        with a bounded channel-wise first order moment.
+                                                                                                                        any
+                                                                                                                      For
+                                                                                                                    rϵ2
+SVD is computationally expensive for large models and              channel j, with probability at least 1 − 2 exp − 8 :
+cannot be efficiently parallelized on GPUs, hindering the
+training process. Therefore, we pose the following question:       (1 − ϵ)∥Mt [:, j]∥2 ≤ ∥MR        2                    2
+                                                                                           t [:, j]∥ ≤ (1 + ϵ)∥Mt [:, j]∥ .
+
+
+ Question ③: Do we still need costly SVD to construct our          Proof : Please refer to Appendix A.1.3.
+ compressed space?
+                                                                   Second-order moment ratio bounding. Similarly, the
+                                                                   second-order moment state can be formulated as:
+4.1.2   APOLLO Performs Well with Random Projection:
+                                                                                                    t−1
+        SVD is Not Necessary.                                                                       X
+                                                                                   Vt = (1 − β2 )         β2k G2t−k
+To answer the above questions, we first analyze the norm                                            k=0
+difference between the first moment MR t in the compressed                                           t−1
+space and the original space, as well as similar results for
+                                                                                                     X
+                                                                                   VtR = (1 − β2 )         β2k R2t−k
+the second state VR
+                  t and Vt .                                                                         k=0
+                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+
+
+Figure 4. Visualization of the channel-wise scaling factor ratio for    √ with rank 1/8n and 1/4n, compared with AdamW (full rank
+                                                                  √APOLLO
+n). The empirical data aligns well with the theoretical ratios 1 : 2 : 2 2, validating the bounds across various layer types and stages on
+the LLaMA-350M model. More visualization can be found at Fig. 8.
+
+
+where we assume V0 = 0 (common in most initialization).                factor can be combined with the learning rate, therefore
+Theorem 4.2. Approximated channel-wise variance with                   set to 1 by default for APOLLO. When the r is too small
+a bound for its ℓ1 norm: For any channel j and time t, if              compared to n, as in our APOLLO-Mini case, which uses
+                                                                       rank-1√space, we specifically assign the scaling factor by
+                                                                       using 128.
+                               
+                        8       2t
+                    r ≥ 2 log       ,
+                        ϵ        δ                                     Moreover, as suggested in GaLore, fixing the projection
+                                                                       matrix is not ideal for high-dimensional LLM training; we
+then with probability at least 1 − δ/2:
+                                                                       also re-sample the projection matrix every T step, which is
+  (1 − ϵ)∥Vt [:, j]∥1 ≤ ∥VtR [:, j]∥1 ≤ (1 + ϵ)∥Vt [:, j]∥1            effortlessly done by re-generating a new seed, which is set
+                                                                       to 200 by default.
+, where Vt [:, j] and VtR [:, j] are the second moments in the                                         p
+                                                                       Empiric evidence of the ratio n/r: We empirically
+original and projected spaces, respectively.                                                                                 pvali-
+                                                                       date the theoretical bound of the scaling factor ratio n/r
+Proof : Please refer to Appendix A.1.4.                                derived in Equation 9 using the LLaMA-350M model.
+                                                                       Specifically, we compare the scaling factors of APOLLO
+                                                                       with ranks 1/8n and 1/4n against the full-rank AdamW
+Bounded update ratio sR /s Now, we can bound the
+                                                                       baseline. The results, visualized in Fig. 4, demonstrate
+difference between the gradient scaling factor in the compact
+                                                                       that the observed ratios align closely with the theoretical
+original space based on the theorem 4.1 and theorem 4.2:
+                                                                       predictions (∼ 0.35 and 0.5 respectively), confirming the ef-
+           ∥R̃t [:, j]∥ ∥Gt [:, j]∥   ∥R̃t [:, j]∥ ∥Gt [:, j]∥         fectiveness of random projection in approximating gradient
+sR
+ j /sj =               ·            =             ·                    scaling factors within our framework. Check more details
+           ∥Rt [:, j]∥ ∥G̃t [:, j]∥   ∥G̃t [:, j]∥ ∥Rt [:, j]∥
+                                                                       in Appendix A.2.
+
+For any channel j, with probability ≥ 1 − δ:                            Take-away ②: APOLLO can approximate the structured
+             √           r R        √                                   learning rate adaption with only random projection.
+               1−ϵ         n sj       1+ϵ
+                      ≤           ≤         .                  (9)
+              1+ϵ          r sj      1−ϵ
+                                                                       4.2   APOLLO-Mini: Achieve Extreme Memory
+                                                                             Efficiency with Rank-1 Space
+Proof : Please refer to Appendix A.1.5.
+                                                                       The rank r plays a crucial role in balancing memory effi-
+Therefore, our APOLLO method is theoretically sound with
+                                                                       ciency and the quality of the approximated gradient scaling
+random projection and validated by the empirical results
+                                                                       factor. Although the coarsening learning rate update rule
+presented in the following section. Additionally, APOLLO
+                                                                       provides high tolerance to relatively low rank, we show our
+with SVD also performs well within our framework, yet
+                                                                       APOLLO can reduce rank by half compared to GaLore with
+incurs significant computational cost. We default to use
+                                                                       a slight impact on perplexity. We still need to pay n × r
+random projection in APOLLO.
+                                                                       memory cost for the optimizer state. If we can relax the
+The theorem   suggests we should scale the gradient with the           rank requirement to 1, then the optimizer state cost is totally
+factor nr to ensure consistent behavior as AdamW with
+       p
+                                                                       negligible. However, simply setting rank to 1 in APOLLO
+structured learning rate update. Hence, we add the gradient            using channel-wise gradient scaling doesn’t work well due
+scale factor α in Algorithm 1. However, this gradient scale            to rank-1 space sacrificing too much information. Details at
+                                       APOLLO: SGD-like Memory, AdamW-level Performance
+
+Section 5.4 A2. This leads to our next question:                    5     E XPERIMENTS
+                                                                    In Section 5.1 and 5.2, we systematically evaluate APOLLO
+ Question ④: “Can we further compress the optimizer state
+                                                                    on various pre-training and downstream tasks, respectively.
+ to SGD-level memory cost while matching or surpassing
+                                                                    Section 5.3 compares the memory overhead and throughput
+ AdamW’s performance?
+                                                                    of different approaches, while Section 5.4 presents exten-
+                                                                    sive ablation studies that analyze the impact of low-rank
+To address this, we introduce an extremely memory-efficient         projection methods, rank quantity, scaling factor granular-
+APOLLO variant, called APOLLO-Mini, which coarsens                  ity, and provide a detailed comparison of training curves.
+the scaling factor into a tensor-wise scaling factor to re-         Section 5.5 shares preliminary insights on why a stateless
+duce variance during gradient scaling estimation in a rank-1        APOLLO can surpass AdamW in certain scenarios,
+                                               ∥R̃t ∥2
+space. The scaling factor is computed as: s = ∥R  t ∥2
+                                                       . More-
+over, we find the tensor-wise scaling factor estimated by           5.1   Memory-Efficient Pre-training with APOLLO
+rank-1 space is typically smaller than the one estimated
+with a larger rank, which can be theoretically justified by         We demonstrate that APOLLO achieves superior pre-
+the theorem in equation 9. Hence, we heuristically set a            training performance across various sizes of LLaMA
+gradient scale factor α like GaLore
+                               √      to avoid performance          models (60M to 7B) on the C4 dataset (Raffel et al.,
+degradation, default to set as 128.                                 2020), with up to a 2.80 reduction in validation perplex-
+                                                                    ity. Additionally, APOLLO-Mini uses negligible memory
+4.3   Savings and cost analysis                                     budget for optimization states while outperforming both
+                                                                    AdamW (Loshchilov, 2017) and GaLore (Zhao et al., 2024).
+Table 1 provides a detailed comparison of memory and
+computational trade-offs among various memory-efficient             Setup. We consider the LLaMA series models for pre-
+training methods, including APOLLO-Mini, APOLLO,                    training, with sizes ranging from 60M to 7B. Following
+Fira (Chen et al., 2024), GaLore (Zhao et al., 2024), and           the training configurations used in prior works (Zhao et al.,
+Flora (Hao et al., 2024). Notably, APOLLO can purely im-            2024; Lialin et al., 2023), we pre-train each model from
+plemented with random projection, thereby avoiding the              scratch, with a detailed description in Appendix.A.5. The
+costly SVD operations required by Fira and GaLore.                  C4 dataset (Raffel et al., 2020), a comprehensive corpus
+                                                                    derived from Common Crawl data and meticulously filtered
+                                                                    and cleaned, is used for pre-training. All experiments are
+Table 1. Detailed comparison between Fira, GaLore, Flora,           conducted in BF16 data format without other quantization.
+APOLLO, and APOLLO-Mini. Denote Wt ∈ Rm×n (m ≤ n),                  Baselines. For comparative analysis, we include the
+rank r. APOLLO series has a constant 2 due to storing random
+                                                                    following baselines in our evaluation: (i) AdamW: We
+seed and gradient norm used for norm-worth limiter.
+                                                                    pre-train the models using the original AdamW opti-
+                                                                    mizer (Loshchilov & Hutter, 2019), maintaining the weights,
+                       APOLLO                                       gradients, and optimizer states in their full-rank format. (ii)
+                                APOLLO     Fira    GaLore   Flora
+                        -Mini
+                                                                    Low-Rank: This approach decomposes the model weights
+ Weights                mn       mn       mn       mn       mn
+                        2n       2nr      2nr      2nr      2nr     into two low-rank matrices (W = U V ), with both U and
+ Optimizer States
+                        +2       +2      +mr + 1   +mr      +1      V optimized using AdamW. (iii) LoRA: LoRA (Hu et al.,
+ Full-Rank Gradients     ✔        ✔         ✔        ✘       ✘      2021) employs low-rank adapters for memory-efficient train-
+ Full-Rank Weights       ✔        ✔         ✔        ✔       ✔      ing by decomposing the original weights as W = W0 +
+ Pre-Training            ✔        ✔         ✔        ✔       ✘
+ Fine-Tuning             ✔        ✔         ✔        ✔       ✔      U V . During training, only U and V are optimized with
+ w.o. SVD                ✔        ✔         ✘        ✘       ✔      AdamW, while the backbone weights W0 remain frozen. (iv)
+                                                                    ReLoRA: ReLoRA (Lialin et al., 2023) is an enhanced ver-
+                                                                    sion of LoRA specifically designed for pre-training, where
+In terms of memory efficiency, random projection allows             the low-rank adapters U V are periodically merged back
+APOLLO to eliminate the need to store a projection ma-              into the original weights W during training. (v) GaLore:
+trix, achieving significant memory efficiency. Additionally,        GaLore (Zhao et al., 2024) projects gradients, rather than
+APOLLO is robust to rank reduction; halving the rank has            weights, into a low-rank space, effectively reducing memory
+minimal impact on pre-training performance (see Table 2).           consumption for optimizer states. (vi) Fira: Fira (Chen
+Our extreme variant, APOLLO-Mini, further maximizes                 et al., 2024) further improves GaLore by incorporating the
+memory efficiency by reducing optimizer state costs to a            error residual of low-rank gradient into training.
+const number 2n + 2, making it comparable to the memory
+footprint of SGD, yet it retains or even surpass AdamW-level        Main Results. We evaluate APOLLO and its two variants:
+performance, as confirmed in the following experiments.             APOLLO w. SVD, which replaces the original random pro-
+                                      APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+Table 2. Comparison of pretraining perplexity across various memory-efficient training approaches. We pretrain the LLaMA models with
+model size ranging from 60M to 1B on the C4 (Raffel et al., 2020) dataset and report the validation perplexity. The memory overhead
+focus solely on weights and optimization states. Results marked with ♠ are collected from (Zhao et al., 2024). By default, we set the rank
+to one-quarter of the original dimension for all low-rank-based training approaches, while results marked with ✝ indicate the use of a halved
+rank, i.e., one-eighth of the original dimension. For a fair comparison, we keep the same training settings as GaLore/Fira, which is
+not tuned on the APOLLO series. We can further tune the hyperparameters, e.g., the learning rates, for optimal performance.
+Here, we report the APOLLO-Mini with a learning rate of 0.02 (not 0.01 in GaLore), achieving stronger results, marked with ‡ .
+                                           60M                    130M                     350M                        1B
+              Methods
+                                Perplexity    Memory      Perplexity   Memory      Perplexity     Memory     Perplexity     Memory
+                       ♠
+              AdamW                34.06         0.36G      25.08        0.76G        18.80        2.06G       15.56        7.80G
+                        ♠
+            Low-Rank               78.18         0.26G      45.51        0.54G        37.41        1.08G      142.53        3.57G
+              LoRA♠                34.99         0.36G      33.92        0.80G        25.58        1.76G      19.21         6.17G
+             ReLoRA♠               37.04         0.36G      29.37        0.80G        29.08        1.76G      18.33         6.17G
+             GaLore♠               34.88         0.24G      25.36        0.52G        18.95        1.22G      15.64         4.38G
+               Fira                31.06         0.24G      22.73        0.52G        17.03        1.22G      14.31         4.38G
+         APOLLO w. SVD             31.26         0.24G      22.84        0.52G        16.67        1.22G       14.10        4.38G
+             APOLLO                31.55         0.24G      22.94        0.52G        16.85        1.22G       14.20        4.38G
+            APOLLO ✝               31.26         0.18G      23.18        0.39G        16.98        0.95G       14.25        3.49G
+          APOLLO-Mini              31.93         0.12G      23.53        0.25G        17.18        0.69G       14.17        2.60G
+         APOLLO-Mini ‡             30.95         0.12G      22.85        0.25G        16.63        0.69G       13.95        2.60G
+
+
+
+jection with SVD; and APOLLO-Mini, which uses a rank
+                                                                         Table 3. Pre-training LLaMA 7B on C4 dataset for 150K steps.
+of 1 and computes the scaling factor in a tensor-wise manner.
+                                                                         Validation perplexity and memory estimate (optimization states
+The memory cost of optimization states in APOLLO-Mini                    only) are reported. Results marked with ♠ are collected from (Zhao
+is negligible, as the rank used is substantially smaller than            et al., 2024). APOLLO uses the rank of 256, and APOLLO-Mini
+the original dimension, e.g., 1 vs. 512 for LLaMA-60M                    uses the rank of 1.
+and 1 vs. 2048 for LLaMA-1B. Results are reported in                                            Optimizer
+                                                                                                            40K     80K      120K    150K
+Table 2, from which several observations can be made: (i)                                       Memory
+Performance under the same memory budget: When                             8-bit Adam♠            13G       18.09   15.47    14.83   14.61
+the rank is set to one-quarter of the original dimension,                  8-bit GaLore♠          4.9G      17.94   15.39    14.95   14.65
+APOLLO consistently outperforms GaLore, achieving up                       APOLLO                 1.6G      17.55   14.39    13.23   13.02
+                                                                           APOLLO-Mini            0.0G      18.03   14.60    13.32   13.09
+to a 3.33 reduction in perplexity; (ii) Comparison with
+full-rank AdamW: APOLLO demonstrates superior per-                         Tokens (B)                        5.2    10.5     15.7    19.7
+formance while using significantly less memory. Notably,
+APOLLO-Mini incurs a memory cost similar to that of
+SGD while significantly outperforming AdamW and vanilla                  130M, Fira shows slightly better performance, but APOLLO
+SGD is known to fail on training transformer-based mod-                  consistently surpasses Fira as model size and training to-
+els (Zhang et al., 2024a); (iii) Robustness across projection            kens increase. An in-depth comparison of training perfor-
+methods and rank sizes: APOLLO exhibits robust perfor-                   mance across model sizes and training tokens is provided
+mance under various subspace projection methods and rank                 in Section 5.4, A4. The above results validate the effective-
+sizes. For instance, with LLaMA-350M, enabling SVD                       ness of APOLLO on pre-training tasks, demonstrating that
+projection results in only a 0.18 improvement of perplexity,             it achieves superior performance while requiring negligible
+while SVD is known for its time-consuming nature (Zhang                  memory costs for optimization states compared to AdamW.
+et al., 2024c). This indicates that APOLLO can maintain ef-              Scaling up to Pre-training LLaMA-7B. We evaluate
+ficiency even without SVD, improving end-to-end through-                 the pre-training of a LLaMA-7B model using AdamW, Ga-
+put. Additionally, halving the rank has negligible impact                Lore, and our APOLLO series (APOLLO (r = 256) and
+on APOLLO ’s performance, further demonstrating its effec-               APOLLO-Mini (r = 1)) on an 8× A100 80GB setup. To
+tiveness across different rank budgets. Section 5.4 provide              ensure performance consistency, a total batch size of 512
+a more thorough analysis of the impact of rank quantity and              per epoch is maintained, while micro-batch sizes are ad-
+projection methods; (iv) Comparison with Fira: APOLLO                    justed based on the memory consumption of each method.
+is more favorable when dealing with larger models and                    AdamW is limited to a micro-batch size of 4 due to memory
+more training tokens. For smaller models like 60M and                    constraints, whereas GaLore matches the memory usage of
+                                      APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+Table 4. Zero-shot performance of LLaMA-350M models pretrained with AdamW and APOLLO-series on commonsense and math
+reasoning tasks.
+                                                           Sequence Length: 256
+       Method      Memory   Perplexity   BoolQ     RTE      HS       WG       OBQA     ARC-E    ARC-C    PIQA     SciQ    MathQA   Average
+       AdamW        1.37G     18.80      0.5881   0.4729   0.3286   0.5335     0.304   0.3615   0.2167   0.6387   0.591   0.2047   0.3554
+      APOLLO        0.34G     16.85      0.5165   0.4729   0.3528   0.5146     0.318   0.3792   0.2517   0.6632   0.592   0.2188   0.3681
+    APOLLO-Mini     0.00G     17.18      0.5434   0.4729   0.3481   0.5162     0.320   0.3653   0.2474   0.6469   0.591   0.2178   0.3654
+                                                           Sequence Length: 1024
+       Method      Memory   Perplexity   BoolQ     RTE      HS       WG       OBQA     ARC-E    ARC-C    PIQA     SciQ    MathQA   Average
+       AdamW        1.37G     16.30      0.4917   0.4693   0.3688   0.5233     0.332   0.3729   0.2449   0.6534   0.609   0.2064   0.3712
+      APOLLO        0.34G     15.64      0.5373   0.4693   0.3850   0.4925     0.322   0.3788   0.2483   0.6681   0.624   0.2127   0.3840
+    APOLLO-Mini     0.00G     16.12      0.5376   0.4693   0.3707   0.5217     0.324   0.3758   0.2312   0.6638   0.619   0.2224   0.3785
+
+
+our methods with a micro-batch size of 8. Considering the                 demonstrate superior performance on downstream tasks
+extended training duration typically required for fully train-            compared to AdamW.
+ing a LLaMA-7B model with AdamW, we allocate a fixed
+training time budget of around two weeks (15 Days) for a                     Conclusion ①: The APOLLO series optimize memory
+fair and practical comparison. The training curve, showing                   usage to a SGD-like level, enhances model quality over
+validation perplexity recorded every 1000 steps, is in Fig. 2.               AdamW, and accelerates pre-training by enabling larger
+                                                                             batch sizes. This makes APOLLO a highly practical and
+Our experiments reveal two key benefits of the APOLLO
+                                                                             efficient solution for large-scale LLM pre-training.
+series on the large 7B model: (i) Accelerated training
+through saved memory, enabling larger batch sizes. The
+significant memory efficiency of the APOLLO series al-                    5.2     Memory-Efficient Fine-tuning with APOLLO
+lows for larger batch sizes, resulting in ∼3× faster training
+throughput compared to AdamW and ∼2× faster throughput                    Pre-training large foundation models typically demands
+compared to GaLore. Notably, our methods are the only                     thousands of GPUs and months of training, making it fea-
+ones to complete the pre-training within the half a month                 sible only for large organizations. As a result, fine-tuning
+timeframe. (ii) Superior model performance with best                      these models has become a more practical approach among
+perplexity and reduced optimizer overhead. Despite its                    engineers and researchers. Here, we thoroughly evaluate
+efficiency, APOLLO delivers better perplexity results than                the performance of APOLLO in fine-tuning scenarios.
+GaLore, even when GaLore employs a high rank of 1024.
+                                                                          Setup. We employ three open-source pre-trained models
+Midway through training, APOLLO surpasses GaLore in
+                                                                          in the fine-tuning experiments, including LLaMA-3.2-1B,
+performance, marking a critical intersection point where our
+                                                                          LLaMA-3-8B (AI@Meta, 2024), Gemma-7B and Mistral-
+approach demonstrates clear superiority. Furthermore, as
+                                                                          7B (Jiang et al., 2023). The downstream tasks are di-
+shown in Tab. 3, the APOLLO series achieves >1.5 perplex-
+                                                                          vided into two categories: (i) Eight common-sense rea-
+ity improvement compared to the 8-bit versions of Adam
+                                                                          soning tasks: Winogrande, PIQA, SIQA, OpenBookQA,
+and GaLore, all while maintaining significantly lower mem-
+                                                                          HellaSwag, BoolQ, and ARC-Easy and ARC-Challenge;
+ory usage for optimizer states.
+                                                                          (ii) MMLU (Hendrycks et al., 2020) tasks across various
+Downstream Task Performance. While perplexity may                         domains: STEM, Social Sciences, Humanities and others.
+not precisely assess model quality (Jaiswal et al., 2023), we
+                                                                          Baseline. We compare APOLLO against several baselines
+further evaluate the pretrained models on a suite of zero-shot
+                                                                          used during the pre-training experiments, including Full-
+common-sense and math reasoning tasks. We use LLaMA-
+                                                                          rank AdamW (Loshchilov, 2017), LoRA (Hu et al., 2021),
+350M trained with sequence lengths of 256 and 1024, se-
+                                                                          GaLore (Zhao et al., 2024), and Fira (Chen et al., 2024).
+lecting the best AdamW checkpoint by sweeping its learn-
+                                                                          Details of these baselines are summarized in Section 5.1.
+ing rates. Table 4 presents results across multiple datasets,
+                                                                          Additionally, we include DoRA (Liu et al., 2024a), an effec-
+including BoolQ (Clark et al., 2019), RTE (Wang et al.,
+                                                                          tive fine-tuning approach. We set the rank to 32 and 8 for
+2018), HellaSwag (HS) (Zellers et al., 2019), Winogrande
+                                                                          common-sense reasoning and MMLU tasks, respectively.
+(WG) (Sakaguchi et al., 2021), OpenBookQA (OBQA) (Mi-
+                                                                          APOLLO-Mini uses a rank of 1.
+haylov et al., 2018), ARC (ARC-Easy (ARC-E), ARC-
+Challenge (ARC-C)) (Clark et al., 2018), PIQA (Bisk et al.,               Main Results. As shown in Table 5 and Table 6, APOLLO
+2020), SciQ (Johannes Welbl, 2017), and MathQA (Amini                     consistently matches or outperforms other baselines, achiev-
+et al., 2019). We confirm that models pretrained with the                 ing up to an 1.01 average accuracy improvement over full-
+APOLLO series not only achieve lower perplexity but also                  rank AdamW on common-sense reasoning tasks. Notably,
+                                           APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+Table 5. Comparison of various finetuning approaches on common-sense reasoning tasks. Experiments are conducted with Llama-3.2-1B
+based on the implementation from (Liu et al., 2024a).
+                     Methods             WG        PIQA        SIQA        OBQA       HS      BoolQ     ARC-E     ARC-C        Average
+                     AdamW              68.19       76.12      72.36        69.00    69.19    64.34      72.22     55.12        68.07
+                      LoRA              67.56       63.28      71.65        68.20    19.13    63.58      67.30     52.99        59.21
+                      DoRA              68.98       74.70      72.47        64.80    63.93    64.01      69.32     52.82        66.38
+                      GaLore            62.75       72.63      68.17        62.20    47.81    58.99      68.94     47.61        61.14
+                       Fira             71.82       77.20      73.08        69.00    68.21    64.31      73.40     54.78        68.98
+                APOLLO w. SVD           70.88       77.69      72.52        70.60    68.19    63.00      74.03     55.72        69.08
+                   APOLLO               70.40       76.93      72.72        70.60    63.75    62.69      73.40     55.20        68.21
+                APOLLO-Mini             67.64       76.50      72.88        69.60    66.54    64.22      72.98     55.46        68.23
+
+
+Table 6. Comparison results of various memory-efficient fine-                       Table 7. Optimizer step time (in seconds) across LLaMA-1B and
+tuning algorithms on MMLU tasks. For Galore, Fira, APOLLO,                          LLaMA-7B with a sequence length of 1024 on a single A100 GPU.
+and APOLLO-Mini, we report the best accuracy obtained by                            Results are averaged over 400 steps, with 100 warm-up steps and
+sweeping the learning rate within the range [5e-6, 7.5e-6, 1e-5,                    low-rank projection matrices updated every 200 steps. Batch sizes
+2.5e-5, 5e-5, 7.5e-5, 1e-4,1.5e-4, 2e-4].                                           are set to 16 (1B) and 4 (7B), the maximum batch size supported
+      Model       Methods      STEM
+                                        Social
+                                                  Humanities   Other   Average
+                                                                                    by AdamW. Lower values indicate less overhead.
+                                       Sciences
+                                                                                                                   Optimizer Step Time (s)
+                   Full        54.27    75.66       59.08      72.80    64.85         Model    Bwd
+                  LoRA         53.00    74.85       58.97      72.34    64.25         Size    Time(s)                      APOLLO
+                                                                                                        AdamW    APOLLO                 GaLore   Fira
+                  GaLore       54.50    75.11       58.59      72.03    64.43                                               -Mini
+ LLaMA-3-8B
+                   Fira        53.53    75.46       58.59      72.09    64.32
+                                                                                       1B     1.069     0.036    0.051       0.048      0.371    0.421
+               APOLLO w. SVD   54.73    75.46       58.72      72.68    64.76          7B     0.712     0.173    0.159       0.142      2.874    3.086
+                  APOLLO       54.37    75.86       58.18      71.69    64.35
+               APOLLO-Mini     54.40    75.37       58.72      71.59    64.41
+                                                                                    7B on 8× A100-80GB GPUs, comparing APOLLO and
+                   Full        30.03    37.16       34.08      35.47    34.21
+                  LoRA         26.23    34.94       30.88      36.96    32.18       APOLLO-Mini against AdamW in Fig. 1.
+  Gemma-7B
+                  GaLore       25.47    33.21       31.07      33.71    30.95       Higher throughput: APOLLO achieves significantly higher
+                   Fira        29.03    35.27       32.40      36.52    33.26
+               APOLLO w. SVD   29.20    40.42       32.40      38.94    34.98
+                                                                                    throughput than AdamW, particularly under limited hard-
+                  APOLLO       27.53    36.97       33.99      36.40    33.81       ware resources, as AdamW struggles with large batch sizes
+               APOLLO-Mini     27.30    33.83       31.61      33.77    31.67
+                                                                                    due to memory constraints. With APOLLO, we can scale
+                   Full        52.40    72.95       55.16      69.05    61.67
+                  LoRA         52.13    72.46       55.05      68.77    61.41
+                                                                                    the batch size up to 4× that of AdamW, resulting in up to a
+  Mistral-7B
+                  GaLore       51.87    72.82       54.94      69.49    61.56       3× improvement in throughput. Additionally, the APOLLO
+                   Fira        52.80    72.85       55.07      69.11    61.72
+                                                                                    series avoids the extra computational overhead associated
+               APOLLO w. SVD   52.43    73.28       55.05      69.24    61.76
+                  APOLLO       51.63    73.12       54.90      69.58    61.58
+                                                                                    with SVD that are known to be expensive.
+               APOLLO-Mini     51.97    72.89       54.43      69.18    61.35       Much lower memory usage: With a batch size of 4,
+                                                                                    AdamW already reaches the memory limit with a mem-
+compared to AdamW, APOLLO requires only a rank-32                                   ory usage of ∼79 GB, while APOLLO and APOLLO-Mini
+space for optimization states, while APOLLO-Mini uses                               require only ∼70 GB and ∼68 GB, respectively, for a batch
+a rank of 1, resulting in negligible memory costs for opti-                         size of 16. This study highlights that using AdamW not only
+mization states. Despite this, both approaches deliver a clear                      results in high memory costs but also reduces training effi-
+margin of accuracy improvement over AdamW on common-                                ciency, as models become memory-bound, preventing full
+sense tasks while maintaining comparable performance on                             utilization of computational resources. By using APOLLO,
+the MMLU tasks.                                                                     we can effectively increase batch size, accelerating large-
+                                                                                    scale training with even better performance.
+ Conclusion ②: The APOLLO series establishes itself as a
+                                                                                    Negligible Optimizer Step Overhead. Beyond end-to-
+ compelling memory-efficient full-parameter fine-tuning
+                                                                                    end throughput, we evaluate optimizer step time to demon-
+ method, delivering on-par or better performance com-
+                                                                                    strate the minimal overhead of the APOLLO series, which
+ pared to AdamW.
+                                                                                    relies only on lightweight random projections, in Table 7.
+                                                                                    We benchmark LLaMA-1B and 7B with a sequence length
+5.3     End-to-End System-level Benefits                                            of 1024, using batch sizes of 16 and 4, respectively—the
+                                                                                    largest batch sizes that AdamW supports.
+We further validate the system-level benefits, end-to-end                           Unlike GaLore and Fira, which suffer from expensive SVD
+throughput, and memory overhead by running LLaMA-                                   updates (taking approximately 10 minutes for the 7B model),
+                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+Table 8. Validation of pretraining perplexity of APOLLO-series combined with int-8 weight quantization strategy (Zhang et al., 2024c).
+APOLLO-series uses a quantization group size of 128. ♠ are collected from (Zhao et al., 2024) and (Zhang et al., 2024c).
+                                                     60M                   130M                     350M
+                        Methods
+                                          Perplexity    Memory     Perplexity    Memory     Perplexity   Memory
+                                 ♠
+                       AdamW                 34.06         0.36G     25.08        0.76G       18.80        2.06G
+                                ♠
+                      GaLore                 34.88         0.24G     25.36        0.52G       18.95        1.22G
+                     Q-GaLore♠               34.88         0.18G     25.53        0.39G       19.79        0.88G
+                      APOLLO                 31.55         0.24G     22.94        0.52G       16.85        1.22G
+                     Q-APOLLO                31.97         0.18G     24.16        0.39G       18.79        0.88G
+                   APOLLO-Mini               31.93         0.12G     23.84        0.25G       17.18        0.69G
+                  Q-APOLLO-Mini              33.05         0.06G     24.70        0.12G       18.90        0.35G
+
+the APOLLO series incurs minimal overhead by relying                 a LLaMA-7B model using just 12 GB of memory (Q-
+only on cheap random projections. While APOLLO intro-                APOLLO-Mini), assuming a layer-wise gradient update
+duces an additional step to compute the scaling factor and           strategy (Lv et al., 2023) is employed. This represents a sig-
+applies NL, projecting gradients into a low-rank space re-           nificant breakthrough in making LLM pre-training feasible
+duces the overhead of maintaining first-order and second-            on low-end GPUs, eliminating the dependency on high-end
+order moments. Notably, on the 7B model, the APOLLO se-              hardware traditionally required for LLM training. Our ap-
+ries achieves even faster optimizer step times than AdamW,           proach democratizes access to LLM pre-training, making it
+demonstrating its efficiency in both compute and memory              accessible to a broader range of researchers and organiza-
+usage. Overall, the optimizer step overhead remains negligi-         tions with limited resources.
+ble compared to the backward pass, particularly for larger
+batch sizes, ensuring that APOLLO enables superior memory             Conclusion ③: The APOLLO series significantly reduces
+efficiency while being a lightweight solution.                        optimizer memory usage with minimal compute over-
+                                                                      head, enabling higher throughput, improved model scal-
+APOLLO-Mini unlocks pre-training LLaMA-13B                            ability, and more friendly low-end GPU training for
+on A100 80GB without system-Level optimization:                       LLMs. APOLLO takes a pivotal step toward democra-
+Leveraging the exceptional memory efficiency of                       tizing LLM training, making large-scale model training
+APOLLO-Mini, we are the first to enable the pre-training              more accessible and efficient.
+of a LLaMA-13B model A100 80GB GPU with naive DDP,
+without requiring other system-level optimizations, such
+as model sharding. This breakthrough not only simplifies             5.4     Extra Investigation and Ablation Study
+deployment by reducing engineering complexity but also
+empowers researchers to scale up model sizes effortlessly
+                                                                     This section presents multiple experimental investigations,
+with APOLLO-Mini.
+                                                                     focusing on four key research questions: Q1: How can the
+Combination with weight quantization unlocks pre-                    scaling factor subspace be identified? Q2: Is APOLLO sen-
+training LLaMA-7B under 12 GB: With our methods                      sitive to the number of rank? Q3: What is an appropriate
+significantly reducing optimizer memory costs, the memory            granularity for scaling factors? Q4: How do detailed com-
+consumed by model weights becomes the next dominant                  parisons evolve throughout the training process? Q5: How
+factor. To further address this challenge, we integrate our          APOLLO performs in long-context training setting?
+approach with the Int8 weight quantization method pro-
+                                                                     A1: Similar performance between Random Projection
+posed in Q-GaLore (Zhang et al., 2024c), enabling even
+                                                                     (RP) and Singular Value Decomposition (SVD). Previ-
+greater memory savings. The results, detailed in Table 8,
+                                                                     ous low-rank gradient-based approaches (Zhao et al., 2024)
+demonstrate that our Q-APOLLO series effectively mini-
+                                                                     rely on SVD to identify the gradient subspace, frequently
+mizes memory usage for both optimizer and weight com-
+                                                                     updated during training. This process is time-consuming,
+ponents while maintaining on-par or better pre-training
+                                                                     thereby affecting training throughput. For a LLaMA-7B
+perplexity compared to full-precision AdamW. Moreover,
+                                                                     model, each SVD operation takes approximately ten min-
+Q-APOLLO achieves a clear performance margin over Q-
+                                                                     utes, resulting in an additional 25 hours of training time
+GaLore, underscoring its superiority in both memory effi-
+                                                                     over 150K steps when the subspace is updated every 1,000
+ciency and model quality.
+                                                                     steps. To alleviate this overhead, (Zhang et al., 2024c) em-
+By successfully combining APOLLO-series with quantiza-               ploys a lazy subspace updating strategy, though it still incurs
+tion, we enable—for the first time—the pre-training of               substantial SVD costs. In this section, we demonstrate that
+                                   APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+
+
+                (a)                            (b)                            (c)                                  (d)
+
+
+
+Figure 5. (a-c) Comparison results of various optimization methods using singular value decomposition or random projection. The
+experiments were conducted on LLaMA-60M/130M/350M models for C4 pretraining tasks. (d) Validation perplexity with varying rank
+sizes, where 128 is one-quarter of the original model dimension. The red dashed line indicates the performance of full-rank AdamW.
+
+APOLLO performs effectively with random projection, sig-
+                                                                   Table 9. Ablation study on the granularity of gradient scaling fac-
+nificantly reducing the heavy SVD costs present in previous
+                                                                   tors. Perplexity on the validation set is reported.
+memory-efficient training algorithms. We pre-train LLaMA
+                                                                            Methods          Granularity   60M     130M     350M
+models ranging from 60M to 350M on the C4 dataset using
+GaLore, APOLLO, and APOLLO-Mini, reporting results                                  AdamW                  34.06    25.08   18.80
+for both SVD and random projection in each method. As                               GaLore                 34.88    25.36   18.95
+shown in Figure 5 (a-c), GaLore is significantly impacted                                     Channel      31.26    22.84   16.67
+                                                                        APOLLO w. SVD
+by random projection, failing to match the performance of                                      Tensor      31.77    23.86   16.90
+AdamW (red dashed line). In contrast, both APOLLO and                                         Channel      31.55    22.94   16.85
+APOLLO-Mini demonstrate strong robustness with ran-                         APOLLO
+                                                                                               Tensor      32.10    23.82   17.00
+dom projection, even slightly outperforming SVD in certain
+cases, such as APOLLO-Mini on LLaMA-350M. These
+results confirm the effectiveness of APOLLO under random           mension of each layer, while Tensor denotes that a single
+projection, thereby addressing the throughput challenges           gradient scaling factor is used for each layer. We keep one-
+present in previous low-rank gradient methods.                     quarter of the original model dimension as the rank. Across
+                                                                   model sizes ranging from 60M to 350M, the perplexity dif-
+A2: APOLLO-Mini remains effective even with a rank of              ference between these granularities is minimal and both
+1. We carry out an ablation study on pre-training LLaMA-           configurations outperform AdamW and GaLore. These re-
+60M with different rank budgets, as shown in Figure 5              sults demonstrate that using a tensor-wise scaling factor is
+(d). The results demonstrate that GaLore’s performance             sufficient for modest rank training (one-quarter of the orig-
+degrades significantly as the rank decreases, matching full-       inal dimension). However, in extreme low-rank scenarios,
+rank AdamW only when the rank is set to 128 (one-quarter           tensor-wise scaling factor (APOLLO-Mini) outperforms
+of the original dimension), which limits its effectiveness in      channel-wise ones (APOLLO), as shown in Figure 5 (d).
+extreme low-rank scenarios. In contrast, APOLLO exhibits
+much better robustness with smaller rank settings compared         A4: APOLLO performs better with larger model sizes and
+to both GaLore and Fira, achieving performance comparable          more training tokens. Figure 6 illustrates the validation
+to full-rank AdamW even with lower ranks.                          perplexity across the training process for LLaMA-350M
+Interestingly, APOLLO-Mini shows the best rank effi-               models. In the early training stages, Fira shows faster con-
+ciency, remaining effective even with a rank of 1, clearly         vergence and lower perplexity. However, APOLLO gradu-
+outperforming AdamW. By averaging the gradient scaling             ally catches up, achieving improved performance in the later
+factor across different channels, APOLLO-Mini seems to             stages. This observation suggests that AdamW optimiza-
+effectively mitigate the errors introduced by low-rank pro-        tion states play a more crucial role in the initial phase (as
+jection. This capability allows APOLLO-Mini to achieve             Fira maintains the low-rank format of these states), while
+SGD level memory cost while reaching superior perfor-              compressing the optimization states into gradient scaling
+mance than AdamW.                                                  factors (as done in APOLLO) becomes more effective in
+                                                                   later stages. Additionally, Figure 6 indicates that APOLLO
+A3: The gradient scaling factor can even be calculated at          seem to benefit from increased training tokens. To quantify
+the tensor level. In Table 9, we compare the pre-training          this effect, we pre-trained LLaMA-130M models for {20k,
+perplexity of our method using different scaling factor gran-      30k} steps, with final perplexities for Fira and APOLLO
+ularities. Here, Channel indicates that the gradient scaling       reaching {22.73, 21.69} and {22.84, 21.71}, respectively,
+factor is calculated along the channels with the smaller di-       further confirming that APOLLO can gradually catch up Fira
+                                       APOLLO: SGD-like Memory, AdamW-level Performance
+
+         Early                Middle                  Late
+
+
+
+
+                                                                                                          Surpasses AdamW with
+                                                                                                           more token exposure
+
+
+
+
+                                                                       Figure 7. Perplexity curves of the LLaMA-350M model trained
+                                                                       in a long-context window setting. APOLLO and APOLLO-Mini
+Figure 6. Validation perplexity of pretraining LLaMA-350M on           outperform AdamW with a grid-searched learning rate, demon-
+the C4 dataset, with zoomed-in figures showing early, middle, and      strating the effectiveness of the APOLLO series in industrial LLM
+late stages of training at top, with full training period at bottom.   pre-training settings(long sequences and extensive training tokens).
+
+                                                                       scaling the raw gradient Gt by a scaling matrix S = G̃   Gt .
+                                                                                                                                  t
+
+
+with more training tokens. Furthermore, Table 2 shows that             APOLLO observes that this fine-grained, parameter-wise
+as model size increases, APOLLO demonstrates better scal-              scaling S can be approximated at the channel or tensor level,
+ing capabilities than Fira: validation perplexity decreases            validated in Fig. 3. Although coarser, this scaling largely
+from 31.55 to 14.20 when scaling model sizes from 60M                  preserves the original gradient direction, (e.g., Gt sR in
+to 1B, whereas Fira only improves from 31.06 to 14.31.                 APOLLO-Mini) and thus behaves similarly to SGD. Such
+Overall, APOLLO exhibits superior performance with both                an “SGD-like” update depends more on the current gradient
+larger model sizes and additional training tokens.                     and injects greater randomness during training, enhanc-
+                                                                       ing the ability to escape local optima and yielding better
+A5: APOLLO performs on par with or even better than                    generalization performance(Zhou et al., 2020; Keskar &
+AdamW in the long-context setting. Training LLM with                   Socher, 2017). This explains why APOLLO series can sur-
+long context windows is computationally expensive, but it              pass AdamW, especially at later training stages (when gener-
+is critical to enhance LLM performance by involving more               alization becomes critical) and for larger models (with more
+contexts to reason. Here, we further validate the effective-           complex loss landscapes). Key observations supporting this
+ness of the APOLLO series on pre-training a LLaMA-350M                 claim include:
+with a long context window of 1024, four times over orig-
+inal GaLore uses. To establish a strong baseline, we vary                 • In Sec. 3.1, Fig. 3, the structured AdamW (APOLLO-
+AdamW’s learning rate across a range of [1e-3, 2.5e-3, 5e-                  style update rule) underperforms AdamW initially but
+3, 7.5e-3, 1e-2]. We also lazily tune the     √ factor
+                                          √ scale  √      of                eventually surpasses it.
+APOLLO-series by varying√  APOLLO’s
+                             √      √ in [ 1,   2,   3] and
+APOLLO-Mini’s in [ 128, 256, 384], under a fixed                          • In Sec. 5.4 (A4), APOLLO typically outperforms
+learning rate 1e-2.                                                         AdamW at later stages of training.
+
+As shown in Fig. 7, both APOLLO and APOLLO-Mini                        Why APOLLO Resembles SGD Yet Performs Well for
+demonstrate better performance than AdamW while achiev-                LLM Training? While SGD is associated with stronger
+ing drastic reductions in optimizer memory costs—1/8 or                generalization, it often struggles with Transformer train-
+even 1/1024 of AdamW’s memory usage. Note that our                     ing (Pan & Li, 2023; Zhang et al., 2024a). APOLLO recon-
+methods generally exhibit even better performance in the               ciles SGD’s generalization benefits with AdamW’s conver-
+later stage with more training tokens involved, marking it             gence speed, as illustrated by the following two hypothe-
+a promising candidate in partial LLM pre-training settings,            ses (Pan & Li, 2023; Zhang et al., 2024a).
+i.e., long-context window and trillions of training tokens.
+                                                                       Hypothesis 1: Directional Sharpness (Pan & Li, 2023)
+5.5   Extra Insights on Why a Stateless Optimizer Can                  A key finding in (Pan & Li, 2023) is that Adam achieves
+      Beat AdamW in Pre-training                                       lower directional sharpness than SGD, thereby improving
+                                                                       Transformer training. The directional sharpness of f at x
+We provide preliminary insights on why a stateless APOLLO
+                                                                       along direction v (with ∥v∥2 = 1) is v ⊤ ∇2 f (x)v. Lower
+can surpass AdamW in certain scenarios, and we leave a
+                                                                       directional sharpness implies the possibility of taking larger
+formal one as the future work.
+                                                                       effective steps, potentially yielding a greater local decrease
+                       Mt
+Adam(W) applies G̃t = √V +ϵ
+                            , which can be viewed as                   in the objective. In contrast, if the directional sharpness is
+                                  t
+                                    APOLLO: SGD-like Memory, AdamW-level Performance
+
+                                                                    necks in LLM training, providing an efficient alternative
+Table 10. Directional sharpness comparison across different opti-
+                                                                    that maintains high performance while drastically reducing
+mizers.
+    Epoch     SGD        Adam       APOLLO     APOLLO-Mini
+                                                                    memory consumption.
+
+      2     1.959722   0.009242    0.006024       0.004017
+      5     1.512521   0.000509    0.000249       0.000107          ACKNOWLEDGEMENTS
+     10     2.471792   0.000242    0.000163       0.000056
+     20     3.207535   0.000399    0.000261       0.000101          We extend our heartfelt gratitude to the following individuals
+                                                                    for their invaluable contributions:
+
+large, we have no choice but to take a tiny step, as otherwise         • Yuandong Tian, for critical discussions and invaluable
+the loss would blow up due to the second-order term.                     insights regarding APOLLO ’s optimization behaviors,
+                                                                         which greatly informed our preliminary theoretical in-
+Empirical tests on APOLLO/APOLLO-Mini (using a small
+                                                                         sights.
+T5 model for a machine translation task following (Pan &
+Li, 2023)) show significantly reduced sharpness relative to
+SGD and comparable to or better sharpness than Adam(W)              R EFERENCES
+(see Table 10). This provides a theoretical underpinning for        AI@Meta.  Llama 3 model card. 2024. URL
+APOLLO ’s effectiveness in LLM training.                              https://github.com/meta-llama/llama3/
+                                                                      blob/main/MODEL_CARD.md.
+Hypothesis 2: Adaptive Learning Rates for Transform-
+ers (Zhang et al., 2024a) Transformer blocks display                Amini, A., Gabriel, S., Lin, P., Koncel-Kedziorski, R., Choi,
+varying Hessian spectra, suggesting that block-wise adap-            Y., and Hajishirzi, H. Mathqa: Towards interpretable math
+tive learning rates are advantageous (Zhang et al., 2024a),          word problem solving with operation-based formalisms,
+which can render naive SGD less suitable. However, fully             2019.
+parameter-wise adaptive learning rates (as in AdamW) can
+                                                                    Biderman, D., Portes, J., Ortiz, J. J. G., Paul, M., Greengard,
+be redundant, as shown in Adam-Mini (Zhang et al., 2024a),
+                                                                      P., Jennings, C., King, D., Havens, S., Chiley, V., Frankle,
+which replaces the second-order moment with group-wise
+                                                                      J., et al. Lora learns less and forgets less. arXiv preprint
+averaging—thereby reducing optimizer memory usage by
+                                                                      arXiv:2405.09673, 2024.
+up to 50%.
+APOLLO applies adaptive learning rates in a structured              Bisk, Y., Zellers, R., Gao, J., Choi, Y., et al. Piqa: Reasoning
+channel-/tensor-wise manner and goes beyond Adam-Mini                 about physical commonsense in natural language. In Pro-
+by reducing memory usage for both first- and second-                  ceedings of the AAAI conference on artificial intelligence,
+order moments, even eliminating optimizer memory in                   volume 34, pp. 7432–7439, 2020.
+APOLLO-Mini.                                                        Brown, T., Mann, B., Ryder, N., Subbiah, M., Kaplan, J. D.,
+                                                                      Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G.,
+6     C ONCLUSION                                                     Askell, A., et al. Language models are few-shot learners.
+                                                                      Advances in neural information processing systems, 33:
+In this paper, we introduced a novel approach for train-              1877–1901, 2020.
+ing large language models (LLMs) that strikes an effec-
+tive balance between memory efficiency and performance.             Chen, T., Xu, B., Zhang, C., and Guestrin, C. Training
+Motivated by the limitations of existing methods like Ga-             deep nets with sublinear memory cost. arXiv preprint
+Lore, which rely on memory-intensive SVD, and inspired                arXiv:1604.06174, 2016.
+by techniques like Fira and Adam-mini, we proposed two
+methods to achieve structured-wise gradient scaling. Our            Chen, X., Feng, K., Li, C., Lai, X., Yue, X., Yuan, Y.,
+approach leverages low-rank optimizer states, using ran-              and Wang, G. Fira: Can we achieve full-rank train-
+dom projection only to preserve gradient norms, enabling              ing of llms under low-rank constraint? arXiv preprint
+efficient training without storing the full optimizer state. Ex-      arXiv:2410.01623, 2024.
+tensive experiments across both pre-training and fine-tuning        Clark, C., Lee, K., Chang, M.-W., Kwiatkowski, T., Collins,
+tasks demonstrate the effectiveness of our APOLLO, consis-            M., and Toutanova, K. Boolq: Exploring the surprising
+tently surpassing the AdamW baseline with greater memory              difficulty of natural yes/no questions. arXiv preprint
+saving than GaLore. APOLLO-Mini further squeeze the                   arXiv:1905.10044, 2019.
+memory cost by using a rank-1 sub-space, achieving better
+performance than AdamW at the cost of SGD. Overall, our             Clark, P., Cowhey, I., Etzioni, O., Khot, T., Sabharwal, A.,
+method offers a promising solution to the memory bottle-              Schoenick, C., and Tafjord, O. Think you have solved
+                                   APOLLO: SGD-like Memory, AdamW-level Performance
+
+  question answering? try arc, the ai2 reasoning challenge.       Keskar, N. S. and Socher, R. Improving generalization per-
+  arXiv preprint arXiv:1803.05457, 2018.                            formance by switching from adam to sgd. arXiv preprint
+                                                                    arXiv:1712.07628, 2017.
+Dettmers, T., Pagnoni, A., Holtzman, A., and Zettlemoyer, L.
+  Qlora: Efficient finetuning of quantized llms. Advances         Kingma, D. P. and Ba, J. Adam: A method for stochastic
+  in Neural Information Processing Systems, 36, 2024.               optimization. arXiv preprint arXiv:1412.6980, 2014.
+Dubey, A., Jauhri, A., Pandey, A., Kadian, A., Al-Dahle,          Kocoń, J., Cichecki, I., Kaszyca, O., Kochanek, M., Szydło,
+ A., Letman, A., Mathur, A., Schelten, A., Yang, A., Fan,           D., Baran, J., Bielaniewicz, J., Gruza, M., Janz, A., Kan-
+ A., et al. The llama 3 herd of models. arXiv preprint              clerz, K., et al. Chatgpt: Jack of all trades, master of none.
+  arXiv:2407.21783, 2024.                                           Information Fusion, 99:101861, 2023.
+Freksen, C. B. An introduction to johnson-lindenstrauss
+                                                                  Lialin, V., Muckatira, S., Shivagunde, N., and Rumshisky,
+  transforms. arXiv preprint arXiv:2103.00564, 2021.
+                                                                    A. Relora: High-rank training through low-rank updates.
+Hao, Y., Cao, Y., and Mou, L. Flora: Low-rank adapters are          In Workshop on Advancing Neural Network Training:
+  secretly gradient compressors. In Forty-first International       Computational Efficiency, Scalability, and Resource Opti-
+  Conference on Machine Learning, 2024. URL https:                  mization (WANT@ NeurIPS 2023), 2023.
+  //openreview.net/forum?id=uubBZKM99Y.
+                                                                  Liang, K., Liu, B., Chen, L., and Liu, Q. Memory-efficient
+He, Y., Li, P., Hu, Y., Chen, C., and Yuan, K. Subspace             llm training with online subspace descent. arXiv preprint
+  optimization for large language models with convergence           arXiv:2408.12857, 2024.
+  guarantees. arXiv preprint arXiv:2410.11289, 2024.
+                                                                  Liu, S., Chen, T., Chen, X., Chen, X., Xiao, Q., Wu, B.,
+Hendrycks, D., Burns, C., Basart, S., Zou, A., Mazeika,             Kärkkäinen, T., Pechenizkiy, M., Mocanu, D., and Wang,
+  M., Song, D., and Steinhardt, J. Measuring mas-                   Z. More convnets in the 2020s: Scaling up kernels beyond
+  sive multitask language understanding. arXiv preprint             51x51 using sparsity. arXiv preprint arXiv:2207.03620,
+  arXiv:2009.03300, 2020.                                           2022.
+Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang,     Liu, S., Wang, C.-Y., Yin, H., Molchanov, P., Wang,
+  S., Wang, L., and Chen, W. Lora: Low-rank adaptation of           Y.-C. F., Cheng, K.-T., and Chen, M.-H. DoRA:
+  large language models. arXiv preprint arXiv:2106.09685,           Weight-decomposed low-rank adaptation. In Forty-
+  2021.                                                             first International Conference on Machine Learning,
+                                                                    2024a. URL https://openreview.net/forum?
+Huang, W., Zhang, Z., Zhang, Y., Luo, Z.-Q., Sun, R., and
+                                                                    id=3d5CIRG1n2.
+ Wang, Z. Galore-mini: Low rank gradient learning with
+  fewer learning rates. In NeurIPS 2024 Workshop on Fine-         Liu, Z., Zhao, C., Iandola, F., Lai, C., Tian, Y., Fedorov,
+ Tuning in Modern Machine Learning: Principles and                  I., Xiong, Y., Chang, E., Shi, Y., Krishnamoorthi, R.,
+ Scalability.                                                       et al. Mobilellm: Optimizing sub-billion parameter lan-
+Jaiswal, A., Gan, Z., Du, X., Zhang, B., Wang, Z., and Yang,        guage models for on-device use cases. arXiv preprint
+  Y. Compressing llms: The truth is rarely pure and never           arXiv:2402.14905, 2024b.
+   simple. arXiv preprint arXiv:2310.01382, 2023.
+                                                                  Loeschcke, S. B., Toftrup, M., Kastoryano, M., Belongie, S.,
+Jiang, A. Q., Sablayrolles, A., Mensch, A., Bamford, C.,            and Snæbjarnarson, V. Loqt: Low-rank adapters for quan-
+   Chaplot, D. S., Casas, D. d. l., Bressand, F., Lengyel, G.,      tized pretraining. In The Thirty-eighth Annual Conference
+   Lample, G., Saulnier, L., et al. Mistral 7b. arXiv preprint      on Neural Information Processing Systems.
+   arXiv:2310.06825, 2023.
+                                                                  Loshchilov, I. Decoupled weight decay regularization. arXiv
+Jiang, Z., Lin, H., Zhong, Y., Huang, Q., Chen, Y., Zhang,          preprint arXiv:1711.05101, 2017.
+   Z., Peng, Y., Li, X., Xie, C., Nong, S., et al. {MegaScale}:
+   Scaling large language model training to more than             Loshchilov, I. and Hutter, F. Decoupled weight decay reg-
+   10,000 {GPUs}. In 21st USENIX Symposium on Net-                  ularization. In International Conference on Learning
+   worked Systems Design and Implementation (NSDI 24),              Representations, 2019.
+   pp. 745–760, 2024.
+                                                                  Lv, K., Yang, Y., Liu, T., Gao, Q., Guo, Q., and Qiu, X. Full
+Johannes Welbl, Nelson F. Liu, M. G. Crowdsourcing mul-             parameter fine-tuning for large language models with lim-
+  tiple choice science questions. 2017.                             ited resources. arXiv preprint arXiv:2306.09782, 2023.
+                                    APOLLO: SGD-like Memory, AdamW-level Performance
+
+Mihaylov, T., Clark, P., Khot, T., and Sabharwal, A. Can              architecture with smart tensor migrations. In Proceedings
+ a suit of armor conduct electricity? a new dataset                   of the 56th Annual IEEE/ACM International Symposium
+ for open book question answering. arXiv preprint                     on Microarchitecture, pp. 395–410, 2023.
+ arXiv:1809.02789, 2018.
+                                                                    Zhang, Y., Chen, C., Ding, T., Li, Z., Sun, R., and Luo, Z.-
+Pan, Y. and Li, Y. Toward understanding why adam con-                 Q. Why transformers need adam: A hessian perspective.
+  verges faster than sgd for transformers. arXiv preprint             arXiv preprint arXiv:2402.16788, 2024a.
+  arXiv:2306.00204, 2023.
+                                                                    Zhang, Y., Chen, C., Li, Z., Ding, T., Wu, C., Ye, Y., Luo,
+Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S.,            Z.-Q., and Sun, R. Adam-mini: Use fewer learning rates
+  Matena, M., Zhou, Y., Li, W., and Liu, P. J. Exploring              to gain more. arXiv preprint arXiv:2406.16793, 2024b.
+  the limits of transfer learning with a unified text-to-text
+  transformer. Journal of machine learning research, 21             Zhang, Z., Jaiswal, A., Yin, L., Liu, S., Zhao, J., Tian,
+  (140):1–67, 2020.                                                   Y., and Wang, Z. Q-galore: Quantized galore with int4
+                                                                      projection and layer-adaptive low-rank gradients. arXiv
+Ren, J., Rajbhandari, S., Aminabadi, R. Y., Ruwase, O.,               preprint arXiv:2407.08296, 2024c.
+  Yang, S., Zhang, M., Li, D., and He, Y. {Zero-offload}:
+  Democratizing {billion-scale} model training. In 2021             Zhao, J., Zhang, Z., Chen, B., Wang, Z., Anandkumar, A.,
+  USENIX Annual Technical Conference (USENIX ATC                      and Tian, Y. Galore: Memory-efficient LLM training by
+  21), pp. 551–564, 2021.                                             gradient low-rank projection. In Forty-first International
+                                                                      Conference on Machine Learning, 2024. URL https:
+Robert, T., Safaryan, M., Modoranu, I.-V., and Alistarh, D.           //openreview.net/forum?id=hYHsrKDiX7.
+  Ldadam: Adaptive optimization from low-dimensional
+  gradient statistics. arXiv preprint arXiv:2410.16103,             Zheng, Y., Zhang, R., Zhang, J., Ye, Y., Luo, Z., Feng,
+  2024.                                                               Z., and Ma, Y. Llamafactory: Unified efficient fine-
+                                                                      tuning of 100+ language models. In Proceedings of the
+Sakaguchi, K., Bras, R. L., Bhagavatula, C., and Choi, Y.             62nd Annual Meeting of the Association for Computa-
+  Winogrande: An adversarial winograd schema challenge                tional Linguistics (Volume 3: System Demonstrations),
+  at scale. Communications of the ACM, 64(9):99–106,                  Bangkok, Thailand, 2024. Association for Computational
+  2021.                                                               Linguistics. URL http://arxiv.org/abs/2403.
+                                                                      13372.
+Tang, Y., Liu, F., Ni, Y., Tian, Y., Bai, Z., Hu, Y.-Q., Liu, S.,
+  Jui, S., Han, K., and Wang, Y. Rethinking optimization            Zhou, P., Feng, J., Ma, C., Xiong, C., Hoi, S. C. H., et al.
+  and architecture for tiny language models. arXiv preprint           Towards theoretically understanding why sgd generalizes
+  arXiv:2402.02791, 2024.                                             better than adam in deep learning. Advances in Neural
+                                                                      Information Processing Systems, 33:21285–21296, 2020.
+Thangarasa, V., Gupta, A., Marshall, W., Li, T., Leong, K.,
+  DeCoste, D., Lie, S., and Saxena, S. Spdf: Sparse pre-
+  training and dense fine-tuning for large language models.
+  In Uncertainty in Artificial Intelligence, pp. 2134–2146.
+  PMLR, 2023.
+
+Wainwright, M. J. Chapter 2: Tail bounds, 2015.
+ URL        https://www.stat.berkeley.edu/
+ ˜ mjwain/stat210b/Chap2_TailBounds_
+ Jan22_2015.pdf.
+
+Wang, A., Singh, A., Michael, J., Hill, F., Levy, O., and
+ Bowman, S. R. Glue: A multi-task benchmark and anal-
+ ysis platform for natural language understanding. arXiv
+ preprint arXiv:1804.07461, 2018.
+
+Zellers, R., Holtzman, A., Bisk, Y., Farhadi, A., and Choi,
+  Y. Hellaswag: Can a machine really finish your sentence?
+  arXiv preprint arXiv:1905.07830, 2019.
+
+Zhang, H., Zhou, Y., Xue, Y., Liu, Y., and Huang, J. G10:
+  Enabling an efficient unified gpu memory and storage
+                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+A       A PPENDIX                                                  Theorem A.1 is proven by leveraging the properties of Gaus-
+                                                                   sian random projections and the concentration inequality
+A.1     Proof of Gradient Scaling Approximation in                 for the chi-squared distribution.
+        Random Projected Low-rank Space
+A.1.1    Problem Statement                                         Proof. The projected norm ∥Px∥2 can be expressed as:
+                                                                                                        !2
+Notations and Definitions: We first introduce the nota-                                   Xr   m
+                                                                                               X
+                                                                                      2
+tions and definitions used in the proof:                                        ∥Px∥ =            Pji xi .
+                                                                                           j=1     i=1
+    • Let Gt ∈ Rm×n denote the gradient matrix at iteration
+                                                                   Rewriting this using the quadratic form, we have:
+      t (m ≤ n).
+                                                                                     ∥Px∥2 = x⊤ P⊤ Px,
+    • Let P ∈ Rr×m denote the random projection matrix
+      where Pij ∼ N (0, 1/r) i.i.d.                                where P⊤ P is a symmetric m × m matrix. To analyze
+    • Define Rt = PGt as the projected gradient.                   ∥Px∥2 , consider the distribution of P⊤ P.
+                                                                   Each entry of P⊤ P is given by:
+    • Let β1 , β2 ∈ (0, 1) be exponential decay rates.
+                                                                                                  r
+    • Define Mt , Vt as first and second moments in the
+                                                                                                  X
+                                                                                   (P⊤ P)ij =           Pki Pkj .
+      original space.                                                                             k=1
+
+    • Define MR      R
+                t , Vt as first and second moments in pro-         For i = j (diagonal entries), we have:
+      jected space.
+                                                                                                   r
+                                                                                                   X
+    • Let T denote the total number of iterations.                                    (P⊤ P)ii =          P2ki ,
+                                                                                                   k=1
+    • Let n denote the number of channels.
+                                                                   and since Pki ∼ N (0, 1/r), P2ki ∼ Exponential(1/r).
+    • Assume zero initialization: M0 = MR
+                                        0 = 0, V0 =
+      V0R = 0.                                                     Therefore, (P⊤ P)ii ∼ 1r χ2r , where χ2r is the chi-squared
+                                                                   distribution with r degrees of freedom. For i ̸= j (off-
+    • ∥∥ indicates ℓ2 norm of a vector.                            diagonal entries), the expectation is zero:
+    • ∥∥1 indicates ℓ1 norm of a vector.                                               E[(P⊤ P)ij ] = 0,
+
+Problem: We aim to prove that gradient scaling factors             due to the independence of Pki and Pkj .
+sj and sR
+        j in the original and low-rank projected space have        The expected value of P⊤ P is therefore:
+a bound for their ratio sR
+                         j /sj ,
+                                                                                        E[P⊤ P] = Im ,
+
+             ∥Gt [:, j]∥ ∥R̃t [:, j]∥   ∥Gt [:, j]∥ ∥R̃t [:, j]∥   where Im is the identity matrix.
+ sR
+  j /sj =                             =
+             ∥G̃t [:, j]∥ ∥Rt [:, j]∥   ∥Rt [:, j]∥ ∥G̃t [:, j]∥   The expectation of ∥Px∥2 is:
+
+where:                                                                   E[∥Px∥2 ] = x⊤ E[P ⊤ P]x = x⊤ Im x = ∥x∥2 .
+                               MR
+                         R̃t = p t
+                                VtR                                Now consider the concentration of ∥Px∥2 around its expec-
+and                                                                tation. Define the random variable:
+                                Mt
+                          G̃t = √                                                             r∥Px∥2
+                                  Vt                                                     Z=          .
+                                                                                               ∥x∥2
+A.1.2    Norm Preservation Under Random Projection
+                                                                  Since Pij entries are i.i.d., Z ∼ χ2r . Using the moment gen-
+Theorem A.1 (Norm Preservation). For any fixed vector             erating function of χ2r , the following concentration bounds
+x ∈ Rm and random matrix P ∈ Rr×m where Pij ∼                     can be derived using standard tail inequalities for sub-
+N (0, 1/r) i.i.d., the following holds with high probability:     exponential random variables (Wainwright, 2015):
+
+                                                           rϵ2                                                  rϵ2
+                                                                                                               
+                                                                                  Z
+Pr[(1−ϵ)∥x∥2 ≤ ∥Px∥2 ≤ (1+ϵ)∥x∥2 ] ≥ 1−2 exp −                   .          Pr       − 1 ≥ ϵ ≤ 2 exp −                .
+                                                            8                     r                              8
+                                      APOLLO: SGD-like Memory, AdamW-level Performance
+
+Returning to ∥Px∥2 , we scale Z back:                               by factoring P out of the summation.
+                                   Z∥x∥2                            This implies the MR   t [:, j] can be viewed as a projected
+                         ∥Px∥2 =         .                          version of Mt [:, j] into a lower dimension with a fixed P
+                                     r
+                                                                    over time t.
+Thus, with high probability:
+          (1 − ϵ)∥x∥2 ≤ ∥Px∥2 ≤ (1 + ϵ)∥x∥2 ,                       Step 3: Properties of Random Projection By Theorem
+                                                                    A.1, we have the norm of Mt [:, j] is preserved in a high
+and the probability of this event is at least:                      probability,
+                                   rϵ2
+                                       
+                   1 − 2 exp −            .
+                                                                                 
+                                    8                                         Pr (1 − ϵ)∥Mt [:, j]∥2 ≤ ∥MR  t [:, j]∥
+                                                                                                                     2
+
+                                                                                                                     
+                                                                                                                   2
+                                                                                            ≤ (1 + ϵ)∥Mt [:, j]∥         (10)
+A.1.3   First Moment Analysis
+                                                                                                              rϵ2
+                                                                                                                  
+Theorem A.2 (First Moment Preservation).                                                    ≥ 1 − 2 exp −             .
+                                           For  any chan-                                                     8
+                                            rϵ2
+nel j, with probability at least 1 − 2 exp − 8 :
+                                                                    Remark: Here, we assume the projection matrix is fixed
+(1 − ϵ)∥Mt [:, j]∥   2
+                         ≤ ∥MR        2                    2
+                             t [:, j]∥ ≤ (1 + ϵ)∥Mt [:, j]∥ ,
+                                                                    over time step t. GaLore (Zhao et al., 2024) also derives
+                                                                    their theorem with the same assumption. However, as ac-
+using a fixed projection matrix Rr×m over t.                        knowledged in GaLore, using the same projection matrix
+                                                                    for the entire training may limit the directions in which the
+Proof. Our goal is to bound ∥MR
+                              t [:, j]∥ in terms of ∥Mt [:          weights can grow. Therefore, empirically, as in GaLore, we
+, j]∥.                                                              can periodically resample P over T iterations to introduce
+                                                                    new directions. Unlike GaLore, which uses time-consuming
+Step 1: Recursive Definitions of Mt [:, j] and MR       t [:, j].   SVD-based updates, we can simply re-sample P from the
+The first moment Mt [:, j] in the original space is recursively     Gaussian distribution by changing the random seed.
+defined as:
+                                   t−1
+                                   X                                A.1.4    Second Moment Analysis
+           Mt [:, j] = (1 − β1 )         β1k Gt−k [:, j],
+                                   k=0                              Theorem A.3 (Second Moment Preservation). For any
+                                                                    channel j and time t, if
+where Gt−k [:, j] ∈ Rm is the gradient at timestep t − k.
+                                                                                                  
+The projected first moment MR                                                                8    2t
+                            t [:, j] is similarly defined as:                          r ≥ 2 log     ,
+                                                                                             ϵ    δ
+                                   t−1
+                                   X
+          MR
+           t [:, j] = (1 − β1 )          β1k Rt−k [:, j],           then with probability at least 1 − δ/2:
+                                   k=0
+
+where Rt−k [:, j] = PGt−k [:, j] ∈ Rr .                              (1 − ϵ)∥Vt [:, j]∥1 ≤ ∥VtR [:, j]∥1 ≤ (1 + ϵ)∥Vt [:, j]∥1
+
+Step 2: Projected First Moment in a Lower Dimension.                , where Vt [:, j] and VtR [:, j] are the second moments in the
+With a random matrix P ∈ Rr×m where Pij ∼ N (0, 1/r)                original and projected spaces, respectively.
+i.i.d., we have the projected first moment in the low-rank
+space,                                                              Proof. Our goal is to show that the norm of the second mo-
+                                t−1                                 ment Vt in the original space is preserved under projection
+                                                                    to the lower-dimensional space. We proceed by analyzing
+                                X
+        MR
+         t [:, j] = (1 − β1 )         β1k Rt−k [:, j]
+                                k=0                                 the recursive definition of Vt and applying the results of
+                                t−1
+                                X                                   Theorem A.2 on norm preservation.
+                  = (1 − β1 )         β1k PGt−k [:, j]
+                                k=0
+                                                            ,       Step 1: Recursive Formulation of Vt The second mo-
+                               t−1
+                                X                                  ment Vt [:, j] for channel j at iteration t is defined recur-
+                  = P (1 − β1 )     β1k Gt−k [:, j]                 sively as:
+                                      k=0
+                  = PMt [:, j]                                              Vt [:, j] = β2 Vt−1 [:, j] + (1 − β2 )(Gt [:, j])2
+                                           APOLLO: SGD-like Memory, AdamW-level Performance
+
+By expanding recursively, we can write Vt [:, j] as a                   Similarly, we can obtain the lower bound,
+weighted sum of the squared gradients from all past itera-                                              t−1
+tions:
+                                                                                                        X
+                                                                        ∥VtR [:, j]∥1 = (1 − β2 )             β2k ||Rt−k [:, j]||2
+                                     t−1
+                                     X                                                                  k=0
+         Vt [:, j] = (1 − β2 )             β2k (Gt−k [:, j])2                             t−1
+                                                                                          X
+                                     k=0                                    ≥ (1 − β2 )         β2k (1 − ϵ)||Gt−k [:, j]||2 = (1 − ϵ)∥Vt [:, j]∥1
+                                                                                          k=0
+Step 2: Projected Second Moment in Lower Dimension
+Similarly, in the projected space, the second moment VtR [:             We obtain the following bounds for the ℓ1 norm of full
+, j] for channel j at iteration t is given by:                          projected second moment VtR [:, j]:
+                       R
+      VtR [:, j] = β2 Vt−1 [:, j] + (1 − β2 )(Rt [:, j])2                    ∥(1 − ϵ)Vt [:, j]∥1 ≤ ∥VtR [:, j]∥1 ≤ ∥(1 + ϵ)Vt [:, j]∥1
+Expanding recursively, we have:                                         .
+                                     t−1
+                                     X                                  Step 5: Probability of Success. To ensure the bound holds
+         VtR [:, j] = (1 − β2 )            β2k (Rt−k [:, j])2           across all t timesteps, we apply the union bound. For each k,
+                                     k=0                                the failure probability is 2 exp(−rϵ2 /8). Across t timesteps,
+                                                                        the total failure probability is:
+Step 3: ℓ1 Norm of Channel-wise Second Moment.
+                                                                                                          rϵ2
+                                                                                                             
+Then, we can obtain the ℓ1 norm of the second-moment
+                                                                                               2t exp −         .
+term VtR [:, j]∥1                                                                                          8
+                       r
+                       X           t−1
+                                   X
+     ∥VtR [:, j]∥1 =     (1 − β2 )     β2k (Rt−k [i, j])2 ,             Set this total failure probability to δ/2, giving the condition:
+                        i=1                k=0
+                                                                                                            
+                                                                                                    8        2t
+                                                                                               r ≥ 2 log          .
+We can swap the summation order and have,                                                          ϵ          δ
+
+                                     t−1
+                                     X           r
+                                                 X                      Remark: Here, the requirement that r grows sublinearly as
+     ∥VtR [:, j]∥1 = (1 − β2 )             β2k         (Rt−k [i, j])2   log(t) ensures that even for large t, the rank r does not grow
+                                     k=0         i=1                    excessively. However, empirically, we find our method
+                                     t−1
+                                     X                                  is not sensitive to rank selection; even a rank of 256 is
+                     = (1 − β2 )           β2k ||Rt−k [:, j]||2         sufficient to train LLaMA 7B with 150k steps. This can
+                                     k=0
+                                                                        be explained by recent Adam-mini (Zhang et al., 2024b)
+                                                                        that the variance doesn’t need to be precise, and a block-
+Similarly, we can have
+                                                                        wise approximation is enough, showing that the variance
+                                    t−1
+                                    X            n
+                                                 X                      approximation error can be tolerated well.
+     ∥Vt [:, j]∥1 = (1 − β2 )              β2k     (Gt−k [i, j])2
+                                    k=0          i=1
+                                    t−1
+                                    X
+                    = (1 − β2 )            β2k ||Gt−k [:, j]||2         A.1.5      Main Result: Gradient Scaling Approximation
+                                    k=0
+                                                                        Theorem A.4 (Main Result). For any channel j, with prob-
+                                                                        ability ≥ 1 − δ:
+Step 4: Constructing the Bounds for VtR [:, j] By The-                                √        r R        √
+orem A.1, we know that for each k, the ℓ2 norm of the                                    1−ϵ     n sj       1+ϵ
+projected gradient ∥Rt−k [:, j]∥ satisfies:                                                  ≤         ≤
+                                                                                       1+ϵ       r sj      1−ϵ
+(1−ϵ)∥Gt−k [:, j]∥2 ≤ ∥Rt−k [:, j]∥2 ≤ 1+ϵ∥Gt−k [:, j]∥2 ,
+                                                                        Proof. Express ratio:
+with probability ≥ 1 − 2 exp(−rϵ2 /8).
+                                                                                            sR
+                                                                                             j   ∥Gt [:, j]∥ ∥R̃t [:, j]∥
+Therefore,                                                                                     =
+                                                                                            sj   ∥Rt [:, j]∥ ∥G̃t [:, j]∥
+                              t−1
+                              X
+∥VtR [:, j]∥1 = (1 − β2 )           β2k ||Rt−k [:, j]||2                Apply Theorem A.2 for the first part, we can obtain the error
+                              k=0                                       bound for the first part:
+              t−1                                                                                   r          r
+                                                                                     ∥Gt [:, j]∥        1          1
+              X
+≤ (1 − β2 )         β2k (1 + ϵ)||Gt−k [:, j]||2 = (1 + ϵ)∥Vt [:, j]∥1                             ∈[         ,        ]
+              k=0                                                                    ∥Rt [:, j]∥      1+ϵ        1−ϵ
+                                       APOLLO: SGD-like Memory, AdamW-level Performance
+
+                                                                          Remark: This contains the constant factor nr , suggesting
+                                                                                                                    p
+For the second part, it is equal to
+                                                                          we should scale the gradient to make sure it has consistent
+                                    MR
+                          2     ∥( √ t R )[:, j]∥2                        behavior as AdamW with structured learning rate update.
+              ∥R̃t [:, j]∥         Vt
+                            =                                             This gradient scale factor can be combined with the learn-
+              ∥G̃t [:, j]∥2   ∥( √MVt )[:, j]∥2
+                                     t
+                                                                 (11)     ing rate. When the r is too small compared to n, as in our
+                                          R
+                              Pr
+                                       √Mt 2                              APOLLO-Mini case, which uses rank-1     √space, we specifi-
+                                i=1 ( VR ) [i, j]
+                            = Pn           t                              cally assign the scaling factor by using 128.
+                                        Mt 2
+                                 i=1 ( V ) [i, j]
+                                        √
+                                              t                           Probability of Success: We now establish the probability
+                                                                          of success. Both Theorem A.3 and Theorem A.4 rely on the
+SGD with Momentum only If we handle SGD with Mo-                          same random projection matrix P are derived from Theorem
+mentum only, where variance term above is non-existent,                   A.2 (norm preservation for random projections). Therefore,
+and can be simplified as                                                  the probability of failure for both bounds is governed by the
+                                                                          failure of Theorem A.2.
+                   ∥R̃t [:, j]∥2    ∥MR
+                                      t [:, j]∥
+                                                2
+                                  =
+                   ∥G̃t [:, j]∥ 2   ∥Mt [:, j]∥ 2                         For a single timestep t, the failure probability of Theorem
+                                                                          A.2 is:
+We can easily apply Theorem A.3 for the first-moment term:                                                                 
+                                                                                                                               rϵ2
+                                                                                                                                   
+                                                                           Pr(Theorem A.2 fails at timestep t) ≤ 2 exp −             .
+               √              ∥MR
+                                t [:, j]∥
+                                           √                                                                                    8
+                   1−ϵ≤                   ≤ 1+ϵ
+                              ∥Mt [:, j]∥
+                                                                          Across all t timesteps, the total failure probability (union
+where the final scaling factor is bounded,                                bound) is:
+                                                                                                                                  rϵ2
+                                                                                                                                     
+                 ∥R̃t [:, j]∥    √      √                                 Pr(Theorem A.2 fails for any timestep) ≤ 2t exp −             .
+                              ∈ [ 1 − ϵ, 1 + ϵ]                                                                                    8
+                 ∥G̃t [:, j]∥
+
+AdamW AdamW’s case is more tricky, as equation 11 in-                     Set this total failure probability to δ:
+volves the element-wise division and cannot easily separate
+                                                                                                          rϵ2
+                                                                                                             
+the momentum and variance. However, recent works such as                                       2t exp −          ≤ δ.
+Adam-mini (Zhang et al., 2024b) and GaLore-mini (Huang                                                     8
+et al.) find out that the variance term can be approximated
+as an average of a block-wise (original full-rank space) or               Solving for r, we require:
+channel-wise (projected low-rank space). Given the ℓ1 norm                                          8
+                                                                                                             
+                                                                                                                 2t
+                                                                                                                      
+of the variance term is bounded based on Theorem A.4, we                                       r≥      log                .
+                                                                                                    ϵ2           δ
+take this assumption by replacing the variance term as the
+                                                         ||VtR [:,j]||1
+average of variance vector, i.e., ||Vt [:,j]||     1
+                                                     and
+                                              n                r          This ensures that both Theorem A.3 and Theorem A.4 hold
+in equation 11. Then it is approximated as,
+                                                                          simultaneously with probability ≥ 1 − δ, which together
+                          Pr       MR t [i,j]
+                                              2
+                                                                          make Theorem A.5 hold.
+                      2     i=1 ( ||VtR [:,j]||1 )
+         ∥R̃t [:, j]∥                   r
+                        = Pn       Mt [i,j]2
+         ∥G̃t [:, j]∥2          (
+                            i=1 ||Vt [:,j]||1 )
+                                        n
+                                                                          A.2   Empirical validation of the derived bound in
+                         r ||Vt [:, j]||1 ∥MRt [:, j]∥
+                                                      2
+                       =( )                                                     Theorem A.4
+                         n ||VtR [:, j]||1 ∥Mt [:, j]∥2
+                                                                                ppart, we present a visualization of the scaling factor
+                                                                          In this
+Multiply inequalities from theorem A.3 and theorem A.4                    ratio n/r derived in Theorem A.4. The plot demonstrates
+with union bound probability ≥ 1 − δ, we have the above                   how the ratio adheres to the theoretical bounds under various
+term      r                   r       r                                   rank settings, providing empirical support for the theorem.
+            n ∥R̃t [:, j]∥      1−ϵ     1+ϵ
+                            ∈[      ,        ]                            Here, we consider the following variants:
+             r ∥G̃t [:, j]∥     1+ϵ     1−ϵ
+
+Then, we have the bounded ratio,                                             • AdamW with the same structured channel-wise
+r R       r                                √       √                           learning rate adaptation rule: This variant uses a
+  n sj       n ∥Gt [:, j]∥ ∥R̃t [:, j]∥      1−ϵ     1+ϵ                       full rank n and serves as the golden standard for esti-
+        =                               ∈[       ,       ]
+  r sj       r ∥Rt [:, j]∥ ∥G̃t [:, j]∥     1+ϵ     1−ϵ                        mating sj , the scaling factor.
+                                      APOLLO: SGD-like Memory, AdamW-level Performance
+
+   • APOLLO with rank r: This variant computes a low-                   with the rank r, therefore we scale
+                                                                                                         √ the gradient factor in
+     rank approximated version of the scaling factor, sR
+                                                       j ,              APOLLO-Mini with setting α to 128.
+                                  p
+     which should theoretically be n/r times smaller than
+     sj .                                                               A.5     Detailed Fine-Tuning Setting
+                                                                        A.5.1    Commonsense reasoning fine-tuning
+We visualize the channel-wise scaling factor on the LLaMA-              We use the implementation from (Liu et al., 2024a) with the
+350M model 1 , comparing APOLLO with ranks 1/8n and                     chosen hyperparameters detailed in Table 12.
+1/4n. These configurations
+                     p       should yield scaling factor ratios
+of approximately 1/8 (∼ 0.35) and 1/2, respectively,                    A.5.2    MMLU fine-tuning
+relative to the full-rank AdamW.
+                                                                        We use the implementation from (Zheng et al., 2024). We
+As shown in Fig. 8, the scaling factor ratio adheres closely            adopt the implementation from (Zheng et al., 2024). For
+to the theoretical predictions across different layer types             a fair and comprehensive comparison, we set the rank to
+(e.g., attention, MLP) and model stages (e.g., early, middle,           8 and sweep the learning rate across the range [5e-6, 7.5-
+or late layers).                                                        6, 1e-5, 2.5e-5, 5e-5, 7.5e-5, 1e-4, 1.5e-4, 2e-4] for Ga-
+                                                                        Lore, Fira, APOLLO, and APOLLO-Mini.    √     Specifically,
+A.3    Training throughput of GaLore-type Optimizer                     APOLLO-Mini uses a scaling factor of 4 for fine-tuning
+       on LLaMA-1B                                                      LLaMA-3-8B and Mistral-7B, while a factor of 1 is applied
+We further show the training throughput for Galore-type low-            to Gemma-7B, as it exhibits higher sensitivity during fine-
+rank optimizer (Galore, Fira) in Fig. 9. At every 200 update            tuning. The full fine-tuning and LoRA results are taken
+step, they need to call SVD to update the projection matrix,            from (Zhang et al., 2024c).
+leading to a drastic drop in training throughput. Although
+Galore tries to amortize the cost by relaxing the update
+gap, the significantly high cost is hard to amortize fully as
+we still keep a short update gap to keep performance; for
+example, to update the projection matrix for a LLaMA 7B
+model needs 10 mins, while inference takes seconds.
+
+A.4    Detailed Pre-Training Setting
+This section provides an overview of the LLaMA architec-
+tures and the hyperparameters used during pre-training. To
+ensure a fair comparison, we adopt the same settings as Zhao
+et al. (2024). Table 11 outlines the hyperparameters for the
+various LLaMA model sizes. Across all architectures, we
+use a maximum sequence length of 256 and a batch size of
+131K tokens. Additionally, we apply a learning rate warm-
+up over the first 10% of training steps, followed by a cosine
+annealing schedule that gradually reduces the learning rate
+to 10% of its initial value.
+APOLLO runs using the same learning rate 0.01 and a sub-
+space change frequency T of 200 without tuning, following
+the Galore open-sourced settings. The scale factor α is
+considered a fractional learning rate, which is set to 1 by
+default in APOLLO for models with a size of less than 1B,
+showing our method doesn’t need too much tuning like Ga-
+               On 1B-model, we set the high-rank APOLLO
+lore and Fira. p
+with a α =       1/2 and the high-rank APOLLO w SVD
+with a α = 0.4. As we find the scaling factor increases
+    1
+      To ensure consistent optimization trajectories across the vari-
+ants, we use the same learning rate as APOLLO with rank 1/4n.
+Additionally, we scale the final gradient updates using the heuristic
+ratio derived from the rank settings relative to 1/4n.
+                                     APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+
+
+Figure 8. Visualization of the channel-wise scaling factor ratio for    √ with rank 1/8n and 1/4n, compared with AdamW (full rank
+                                                                  √APOLLO
+n). The empirical data aligns well with the theoretical ratios 1 : 2 : 2 2, validating the bounds across various layer types and stages on
+the LLaMA-350M model.
+       Token/second
+
+
+
+
+Figure 9. The training throughput of Galore-type low-rank opti-
+mizer with many spikes due to the expensive SVD operation every
+200 steps.
+                            APOLLO: SGD-like Memory, AdamW-level Performance
+
+
+
+
+                       Table 11. Hyper-parameters of LLaMA architectures for pre-training.
+
+                  Params    Hidden    Intermediate   Heads     Layers   Steps   Data Amount (Tokens)
+                    60M       512           1376       8         8       10K            1.3 B
+                   130M       768          2048       12        12      20K            2.6 B
+                   350M      1024          2736       16        24      60K            7.8 B
+                    1B       2048           5461      24        32      100K           13.1 B
+                    7B       4096          11008      32        32      150K           19.7 B
+
+
+
+
+                  Table 12. Hyperparameter of Llama-3.2-1B on the commonsense reasoning tasks.
+
+Hyperparameters     AdamW           LoRA     DoRA     Galore     Fira    APOLLO w.SVD           APOLLO   APOLLO-Mini
+    Rank r              -            32        32       32     32         32                     32           1
+       α                -            64        64        -      -          -                     √-         √-
+     scale              -             -         -      0.25   0.25        1.0                      5         128
+   Dropout                                                         0.05
+      LR          [2e-5, 5e-5]      3e-4      3e-4     3e-4   3e-4       3e-4                    3e-4        3e-4
+ LR Scheduler                                                     Linear
+  Batch size                                                        32
+ Warmup Steps                                                      100
+   Epochs                                                            3
+    Where                                                   Q,K,V,Up,Down
+

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>APOLLO Poster</title>
+  <link rel="stylesheet" href="poster.css">
+</head>
+<body>
+  <main class="poster">
+    <section class="hero">
+      <article class="card">
+        <span class="tag">MVA Poster</span>
+        <span class="tag">nanoGPT / WikiText-2</span>
+        <span class="tag">Memory vs Quality vs Speed</span>
+        <h1>APOLLO on Small GPT-2: Can Structured Scaling Beat the AdamW vs GaLore Tradeoff?</h1>
+        <p>
+          We reproduce the core APOLLO story on a GPT-2 124M setup: AdamW is accurate but memory-hungry,
+          GaLore is memory-efficient but SVD-heavy, and SGD is cheap but weak for Transformers. APOLLO claims
+          to keep AdamW-level quality while moving toward SGD-like memory cost.
+        </p>
+      </article>
+      <article class="card">
+        <h2>The Dilemma</h2>
+        <div class="bar"></div>
+        <ul>
+          <li><strong>AdamW</strong>: good convergence, poor memory footprint.</li>
+          <li><strong>GaLore</strong>: lower optimizer memory, but SVD adds compute spikes.</li>
+          <li><strong>SGD + Momentum</strong>: fast and light, yet unstable for Transformer pretraining.</li>
+          <li><strong>APOLLO</strong>: structured scaling + random projection.</li>
+        </ul>
+        <div class="stats">
+          <div class="stat"><strong>3000</strong><span>train steps</span></div>
+          <div class="stat"><strong>124M</strong><span>GPT-2 size</span></div>
+          <div class="stat"><strong>7+</strong><span>optimizers / ranks</span></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>AdamW-level Performance</h2>
+        <div class="bar"></div>
+        <h3>The Convergence Race</h3>
+        <div class="figure">
+          <img src="assets/generated/convergence_race.png" alt="convergence"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `convergence_race.png`</div>
+        </div>
+        <h3 style="margin-top:16px;">Scaling-factor sanity check</h3>
+        <div class="figure">
+          <img src="assets/generated/scaling_ratio.png" alt="scaling ratio"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `scaling_ratio.png`</div>
+        </div>
+        <p>Core claim: APOLLO remains near AdamW in loss/perplexity while using far less optimizer-state memory.</p>
+      </article>
+
+      <article class="card">
+        <h2>Memory and Throughput</h2>
+        <div class="bar"></div>
+        <h3>Memory Breakdown</h3>
+        <div class="figure">
+          <img src="assets/generated/memory_breakdown.png" alt="memory breakdown"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `memory_breakdown.png`</div>
+        </div>
+        <h3 style="margin-top:16px;">Max Batch Size and Throughput</h3>
+        <div class="figure">
+          <img src="assets/generated/batch_throughput.png" alt="batch throughput"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `batch_throughput.png`</div>
+        </div>
+        <h3 style="margin-top:16px;">Pareto Frontier</h3>
+        <div class="figure">
+          <img src="assets/generated/pareto_frontier.png" alt="pareto frontier"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `pareto_frontier.png`</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Systems and Failure Modes</h2>
+        <div class="bar"></div>
+        <h3>Optimizer-step spikes</h3>
+        <div class="figure">
+          <img src="assets/generated/optimizer_step_spikes.png" alt="optimizer spikes"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `optimizer_step_spikes.png`</div>
+        </div>
+        <h3 style="margin-top:16px;">Directional Sharpness</h3>
+        <div class="figure">
+          <img src="assets/generated/sharpness_curve.png" alt="sharpness"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `sharpness_curve.png`</div>
+        </div>
+        <h3 style="margin-top:16px;">Ablation and Failure Modes</h3>
+        <div class="figure">
+          <img src="assets/generated/rank_ablation.png" alt="rank ablation"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `rank_ablation.png`</div>
+        </div>
+        <div class="figure" style="margin-top:16px;">
+          <img src="assets/generated/granularity_r1.png" alt="granularity r1"
+               onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+          <div class="placeholder">Insert `granularity_r1.png`</div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
+
