@@ -130,7 +130,7 @@ def _measure_at_batch_size(
             raise RuntimeError(f"Exceeded logical memory budget: {peak_memory_gb:.2f} GB > {budget:.2f} GB")
 
         summary = {
-            "max_batch_size": batch_size,
+            "batch_size": batch_size,
             "tokens_per_second": total_tokens / max(total_elapsed, 1e-12),
             "avg_step_time_s": total_elapsed / max(measure_steps, 1),
             "peak_memory_gb": peak_memory_gb,
@@ -150,35 +150,76 @@ def _measure_at_batch_size(
         raise
 
 
-def _find_max_batch_size(config: dict[str, Any]) -> int:
+def _measure_batch_sweep(config: dict[str, Any], output_dir: Path) -> list[dict[str, Any]]:
     bench_cfg = config["benchmark"]
-    best = 0
+    sweep_path = output_dir / "batch_sweep.jsonl"
+    if sweep_path.exists():
+        sweep_path.unlink()
+
+    records: list[dict[str, Any]] = []
     current = bench_cfg["initial_batch_size"]
     cap = bench_cfg["batch_size_cap"]
-
     while current <= cap:
         try:
-            _measure_at_batch_size(config, current, warmup_steps=1, measure_steps=1)
-            best = current
+            summary = _measure_at_batch_size(config, current, warmup_steps=1, measure_steps=1)
+            record = {
+                "batch_size": current,
+                "success": True,
+                "peak_memory_gb": summary["peak_memory_gb"],
+            }
+            records.append(record)
+            append_jsonl(sweep_path, record)
             current *= 2
         except RuntimeError as exc:
             if not _is_oom(exc):
                 raise
+            record = {
+                "batch_size": current,
+                "success": False,
+                "peak_memory_gb": None,
+            }
+            records.append(record)
+            append_jsonl(sweep_path, record)
             break
+    return records
+
+
+def _find_max_batch_size(config: dict[str, Any], output_dir: Path) -> tuple[int, list[dict[str, Any]]]:
+    records = _measure_batch_sweep(config, output_dir)
+    successful = [row["batch_size"] for row in records if row["success"]]
+    best = max(successful) if successful else 0
 
     low = best + 1
+    current = max([row["batch_size"] for row in records], default=best)
+    cap = config["benchmark"]["batch_size_cap"]
     high = min(cap, current - 1 if current > best else cap)
+    sweep_path = output_dir / "batch_sweep.jsonl"
     while low <= high:
         mid = (low + high) // 2
         try:
-            _measure_at_batch_size(config, mid, warmup_steps=1, measure_steps=1)
+            summary = _measure_at_batch_size(config, mid, warmup_steps=1, measure_steps=1)
             best = mid
+            record = {
+                "batch_size": mid,
+                "success": True,
+                "peak_memory_gb": summary["peak_memory_gb"],
+            }
+            records.append(record)
+            append_jsonl(sweep_path, record)
             low = mid + 1
         except RuntimeError as exc:
             if not _is_oom(exc):
                 raise
+            record = {
+                "batch_size": mid,
+                "success": False,
+                "peak_memory_gb": None,
+            }
+            records.append(record)
+            append_jsonl(sweep_path, record)
             high = mid - 1
-    return best
+    records = sorted(records, key=lambda row: row["batch_size"])
+    return best, records
 
 
 def benchmark_experiment(config: dict[str, Any]) -> dict[str, Any]:
@@ -186,18 +227,46 @@ def benchmark_experiment(config: dict[str, Any]) -> dict[str, Any]:
     device = resolve_device(config["training"].get("device", "auto"))
     output_dir = ensure_dir(Path(config["output_root"]) / config["experiment_name"])
     save_yaml(output_dir / "config.yaml", config)
-    max_batch_size = _find_max_batch_size(config)
+    max_batch_size, sweep_records = _find_max_batch_size(config, output_dir)
     if max_batch_size < 1:
         raise RuntimeError("Could not fit even a single batch. Reduce the model or sequence length.")
-    summary = _measure_at_batch_size(
-        config,
-        batch_size=max_batch_size,
-        warmup_steps=config["benchmark"]["warmup_steps"],
-        measure_steps=config["benchmark"]["measure_steps"],
-        output_dir=output_dir,
-    )
+    final_batch_size = max_batch_size
+    while final_batch_size >= 1:
+        try:
+            summary = _measure_at_batch_size(
+                config,
+                batch_size=final_batch_size,
+                warmup_steps=config["benchmark"]["warmup_steps"],
+                measure_steps=config["benchmark"]["measure_steps"],
+                output_dir=output_dir,
+            )
+            break
+        except RuntimeError as exc:
+            if not _is_oom(exc) or final_batch_size == 1:
+                raise
+            final_batch_size -= 1
+    summary["max_batch_size"] = final_batch_size
     summary["experiment_name"] = config["experiment_name"]
     summary["device"] = str(device)
     summary["memory_budget_gb"] = config["benchmark"].get("memory_budget_gb")
+    summary["batch_sweep"] = sweep_records
+    memory_profile_batch_size = config["benchmark"].get("memory_profile_batch_size")
+    if config["benchmark"].get("profile_memory", False):
+        profile_batch_size = int(memory_profile_batch_size or final_batch_size)
+        try:
+            memory_summary = _measure_at_batch_size(
+                config,
+                batch_size=profile_batch_size,
+                warmup_steps=max(1, min(config["benchmark"]["warmup_steps"], 3)),
+                measure_steps=1,
+                output_dir=None,
+            )
+            summary["memory_breakdown"] = memory_summary.get("memory_breakdown")
+            summary["memory_profile_batch_size"] = profile_batch_size
+        except RuntimeError as exc:
+            if not _is_oom(exc):
+                raise
+            summary["memory_breakdown"] = None
+            summary["memory_profile_batch_size"] = profile_batch_size
     write_json(output_dir / "benchmark_summary.json", summary)
     return summary

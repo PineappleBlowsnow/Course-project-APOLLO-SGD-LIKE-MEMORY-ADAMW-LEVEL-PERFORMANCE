@@ -1,0 +1,54 @@
+suite_name: full_pretrain
+shared_config: configs/base_llama60_c4.yaml
+
+experiments:
+  - name: adamw
+    overrides:
+      optimizer:
+        name: adamw
+      analysis:
+        enable_scaling_trace: true
+
+  - name: apollo_svd
+    overrides:
+      optimizer:
+        name: apollo
+        rank_ratio: 0.25
+        granularity: channel
+        projection: svd
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: apollo_rank_1_4
+    overrides:
+      optimizer:
+        name: apollo
+        rank_ratio: 0.25
+        granularity: channel
+        projection: random
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: apollo_rank_1_8
+    overrides:
+      optimizer:
+        name: apollo
+        rank_ratio: 0.125
+        granularity: channel
+        projection: random
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: apollo_mini
+    overrides:
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        projection: random
+        scale: 128.0
+      analysis:
+        enable_scaling_trace: true

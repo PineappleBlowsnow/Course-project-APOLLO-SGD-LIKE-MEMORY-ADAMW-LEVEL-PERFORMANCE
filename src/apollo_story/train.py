@@ -4,7 +4,6 @@ import gc
 import math
 import time
 from contextlib import nullcontext
-from itertools import cycle
 from pathlib import Path
 from typing import Any
 import re
@@ -14,7 +13,7 @@ from tqdm.auto import tqdm
 
 from .config import save_yaml
 from .data import build_dataloaders
-from .model import GPT, GPTConfig
+from .model import build_model_from_config
 from .optimizers import TraceableOptimizer, build_optimizer
 from .utils import (
     append_jsonl,
@@ -30,19 +29,11 @@ from .utils import (
 )
 
 
-def build_model(config: dict[str, Any]) -> GPT:
+def build_model(config: dict[str, Any]) -> torch.nn.Module:
     model_cfg = config["model"]
-    return GPT(
-        GPTConfig(
-            vocab_size=model_cfg["vocab_size"],
-            block_size=model_cfg["block_size"],
-            n_layer=model_cfg["n_layer"],
-            n_head=model_cfg["n_head"],
-            n_embd=model_cfg["n_embd"],
-            dropout=model_cfg["dropout"],
-            bias=model_cfg["bias"],
-        )
-    )
+    model = build_model_from_config(model_cfg)
+    print(f"Model parameters: {count_parameters(model):,}")
+    return model
 
 
 def _autocast_context(device: torch.device, precision: str):
@@ -73,6 +64,12 @@ def _build_scheduler(optimizer: torch.optim.Optimizer, config: dict[str, Any]):
 
 def _flatten_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat([tensor.reshape(-1) for tensor in tensors])
+
+
+def _infinite_loader(loader):
+    while True:
+        for batch in loader:
+            yield batch
 
 
 @torch.no_grad()
@@ -226,7 +223,7 @@ def train_experiment(config: dict[str, Any], resume: str | None = None) -> dict[
     precision = config["training"]["mixed_precision"]
     use_scaler = device.type == "cuda" and precision == "fp16"
     scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
-    train_iterator = cycle(train_loader)
+    train_iterator = _infinite_loader(train_loader)
     train_cfg = config["training"]
     analysis_cfg = config["analysis"]
     start_step = 0

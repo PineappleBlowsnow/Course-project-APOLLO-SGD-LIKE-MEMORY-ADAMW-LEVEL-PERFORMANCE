@@ -1,0 +1,29 @@
+suite_name: full_pretrain
+shared_config: configs/base_llama130_c4.yaml
+
+experiments:
+  - name: elementwise
+    overrides:
+      optimizer:
+        name: elementwise
+      analysis:
+        enable_scaling_trace: true
+
+  - name: channelwise
+    overrides:
+      optimizer:
+        name: channelwise
+        granularity: channel
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: channelwise_nl
+    overrides:
+      optimizer:
+        name: channelwise_nl
+        granularity: channel
+        scale: 1.0
+        norm_limiter: true
+      analysis:
+        enable_scaling_trace: true

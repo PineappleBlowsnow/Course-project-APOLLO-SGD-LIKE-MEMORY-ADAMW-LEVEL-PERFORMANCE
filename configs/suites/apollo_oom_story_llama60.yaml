@@ -1,0 +1,79 @@
+suite_name: oom_story
+shared_config: configs/base_llama60_c4.yaml
+
+experiments:
+  - name: adamw_oom_story
+    overrides:
+      run_kind: benchmark
+      analysis:
+        enable_memory_profile: true
+      benchmark:
+        enabled: true
+        synthetic: true
+        initial_batch_size: 8
+        batch_size_cap: 1024
+        warmup_steps: 10
+        measure_steps: 250
+        profile_memory: true
+      optimizer:
+        name: adamw
+
+  - name: apollo_rank_1_4_oom_story
+    overrides:
+      run_kind: benchmark
+      analysis:
+        enable_memory_profile: true
+      benchmark:
+        enabled: true
+        synthetic: true
+        initial_batch_size: 8
+        batch_size_cap: 1024
+        warmup_steps: 10
+        measure_steps: 250
+        profile_memory: true
+      optimizer:
+        name: apollo
+        rank_ratio: 0.25
+        granularity: channel
+        projection: random
+        scale: 1.0
+
+  - name: apollo_rank_1_8_oom_story
+    overrides:
+      run_kind: benchmark
+      analysis:
+        enable_memory_profile: true
+      benchmark:
+        enabled: true
+        synthetic: true
+        initial_batch_size: 8
+        batch_size_cap: 1024
+        warmup_steps: 10
+        measure_steps: 250
+        profile_memory: true
+      optimizer:
+        name: apollo
+        rank_ratio: 0.125
+        granularity: channel
+        projection: random
+        scale: 1.0
+
+  - name: apollo_mini_oom_story
+    overrides:
+      run_kind: benchmark
+      analysis:
+        enable_memory_profile: true
+      benchmark:
+        enabled: true
+        synthetic: true
+        initial_batch_size: 8
+        batch_size_cap: 1024
+        warmup_steps: 10
+        measure_steps: 250
+        profile_memory: true
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        projection: random
+        scale: 128.0

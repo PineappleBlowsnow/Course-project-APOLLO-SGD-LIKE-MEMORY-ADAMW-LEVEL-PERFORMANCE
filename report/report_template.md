@@ -18,39 +18,43 @@ This project verifies the following claims on a GPT-2 124M + WikiText-2 setup:
 
 ## 3. Results
 
-### 3.1 Convergence Race
+### 3.1 Validation Convergence
+
+Insert `validation_convergence.png`
+
+### 3.2 Training Convergence
 
 Insert `convergence_race.png`
 
-### 3.2 Scaling Factor Ratio
+### 3.3 Scaling Factor Ratio
 
 Insert `scaling_ratio.png`
 
-### 3.3 Table-2-like comparison
+### 3.4 Table-2-like comparison
 
-Insert `table2_like.csv`
+Insert `table2_like.csv` 
 
-### 3.4 Pareto Frontier
+### 3.5 Pareto Frontier
 
 Insert `pareto_frontier.png`
 
-### 3.5 Memory Breakdown
+### 3.6 Memory Breakdown
 
 Insert `memory_breakdown.png`
 
-### 3.6 Max Batch Size and Throughput
+### 3.7 Max Batch Size and Throughput
 
 Insert `batch_throughput.png`
 
-### 3.7 Optimizer Step Spikes
+### 3.8 Optimizer Step Spikes
 
 Insert `optimizer_step_spikes.png`
 
-### 3.8 Directional Sharpness
+### 3.9 Directional Sharpness
 
 Insert `sharpness_curve.png`
 
-### 3.9 Rank / Granularity Ablation
+### 3.10 Rank / Granularity Ablation
 
 Insert `rank_ablation.png` and `granularity_r1.png`
 
@@ -66,4 +70,3 @@ Insert `rank_ablation.png` and `granularity_r1.png`
 - WikiText-2 is much smaller than the original paper's scale.
 - The GaLore implementation is a small-scale reproduction, not a full industrial training stack.
 - Pressure testing is implemented via logical memory budgets in benchmarking.
-

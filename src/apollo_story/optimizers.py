@@ -47,6 +47,27 @@ def _tensor_scale(update_like: torch.Tensor, reference: torch.Tensor, eps: float
     return num / den
 
 
+def _grouped_rowwise_scale(
+    update_like: torch.Tensor,
+    reference: torch.Tensor,
+    eps: float,
+    num_groups: int,
+) -> torch.Tensor:
+    rows, cols = update_like.shape
+    num_groups = max(1, min(num_groups, rows))
+    row_indices = torch.arange(rows, device=update_like.device)
+    row_groups = torch.div(row_indices * num_groups, rows, rounding_mode="floor")
+    scales = torch.empty((num_groups, cols), device=update_like.device, dtype=update_like.dtype)
+    for group_idx in range(num_groups):
+        mask = row_groups == group_idx
+        group_update = update_like[mask]
+        group_reference = reference[mask]
+        num = torch.linalg.vector_norm(group_update, dim=0)
+        den = torch.linalg.vector_norm(group_reference, dim=0).clamp_min(eps)
+        scales[group_idx] = num / den
+    return scales
+
+
 def _random_projection(rows: int, rank: int, device: torch.device, seed: int) -> torch.Tensor:
     generator = torch.Generator(device=device.type if device.type != "mps" else "cpu")
     generator.manual_seed(seed)
@@ -216,6 +237,102 @@ class AdamWTracked(TraceableOptimizer):
                     update_matrix, _ = _flatten_and_orient(update)
                     scale = _channel_scale(update_matrix, grad_matrix, group["eps"])
                     self._record_scaling(group, step, scale, tag="adamw_channel_scale", rank=None)
+
+                update = _apply_norm_limiter(
+                    update,
+                    state,
+                    group["norm_limiter"],
+                    group["norm_limiter_gamma"],
+                )
+                param.add_(update.to(param.dtype), alpha=-group["lr"])
+        return loss
+
+
+class StructuredAdam(TraceableOptimizer):
+    def __init__(
+        self,
+        params,
+        lr: float,
+        betas: tuple[float, float],
+        eps: float,
+        granularity: str,
+        scale: float,
+        num_groups: int,
+        norm_limiter: bool,
+        norm_limiter_gamma: float,
+    ) -> None:
+        defaults = dict(
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            granularity=granularity,
+            scale=scale,
+            num_groups=num_groups,
+            norm_limiter=norm_limiter,
+            norm_limiter_gamma=norm_limiter_gamma,
+        )
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            beta1, beta2 = group["betas"]
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                grad = param.grad.detach().float()
+                state = self.state[param]
+                state["step"] = state.get("step", 0) + 1
+                step = state["step"]
+                if group["weight_decay"] != 0.0:
+                    param.mul_(1.0 - group["lr"] * group["weight_decay"])
+
+                exp_avg = _init_like(state, "exp_avg", grad)
+                exp_avg_sq = _init_like(state, "exp_avg_sq", grad)
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                m_hat = exp_avg / (1.0 - beta1**step)
+                v_hat = exp_avg_sq / (1.0 - beta2**step)
+                elementwise_update = m_hat / (torch.sqrt(v_hat) + group["eps"])
+
+                if grad.ndim < 2:
+                    update = elementwise_update
+                else:
+                    grad_matrix, meta = _flatten_and_orient(grad)
+                    update_matrix, _ = _flatten_and_orient(elementwise_update)
+                    if group["granularity"] == "tensor":
+                        scale = _tensor_scale(update_matrix, grad_matrix, group["eps"]) * group["scale"]
+                        structured_update = grad_matrix * scale
+                    elif group["granularity"] == "grouped_rowwise":
+                        scale = _grouped_rowwise_scale(
+                            update_matrix,
+                            grad_matrix,
+                            group["eps"],
+                            group["num_groups"],
+                        ) * group["scale"]
+                        rows, _ = grad_matrix.shape
+                        row_indices = torch.arange(rows, device=grad_matrix.device)
+                        row_groups = torch.div(
+                            row_indices * group["num_groups"],
+                            rows,
+                            rounding_mode="floor",
+                        )
+                        structured_update = grad_matrix * scale[row_groups]
+                    else:
+                        scale = _channel_scale(update_matrix, grad_matrix, group["eps"]) * group["scale"]
+                        structured_update = grad_matrix * scale.unsqueeze(0)
+                    self._record_scaling(
+                        group,
+                        step,
+                        scale,
+                        tag=f"structured_{group['granularity']}_scale",
+                        rank=None,
+                    )
+                    update = _restore_orientation(structured_update, meta)
 
                 update = _apply_norm_limiter(
                     update,
@@ -427,7 +544,7 @@ def build_optimizer(model: torch.nn.Module, config: dict[str, Any]) -> Traceable
             momentum=train_cfg["momentum"],
             weight_decay=train_cfg["weight_decay"],
         )
-    if name == "adamw":
+    if name in {"adamw", "elementwise"}:
         return AdamWTracked(
             groups,
             lr=train_cfg["learning_rate"],
@@ -445,6 +562,38 @@ def build_optimizer(model: torch.nn.Module, config: dict[str, Any]) -> Traceable
             rank=opt_cfg.get("rank"),
             rank_ratio=opt_cfg.get("rank_ratio"),
             projection_update_gap=opt_cfg.get("projection_update_gap", 200),
+        )
+    if name in {"structured", "channelwise", "tensorwise", "channelwise_nl", "grouped_rowwise_k2", "grouped_rowwise_k4"}:
+        granularity = opt_cfg.get("granularity", "channel")
+        norm_limiter = opt_cfg.get("norm_limiter", False)
+        num_groups = int(opt_cfg.get("num_groups", 1))
+        if name == "channelwise":
+            granularity = "channel"
+            norm_limiter = False
+        elif name == "tensorwise":
+            granularity = "tensor"
+            norm_limiter = False
+        elif name == "channelwise_nl":
+            granularity = "channel"
+            norm_limiter = True
+        elif name == "grouped_rowwise_k2":
+            granularity = "grouped_rowwise"
+            num_groups = 2
+            norm_limiter = False
+        elif name == "grouped_rowwise_k4":
+            granularity = "grouped_rowwise"
+            num_groups = 4
+            norm_limiter = False
+        return StructuredAdam(
+            groups,
+            lr=train_cfg["learning_rate"],
+            betas=tuple(train_cfg["betas"]),
+            eps=train_cfg["eps"],
+            granularity=granularity,
+            scale=opt_cfg.get("scale", 1.0),
+            num_groups=num_groups,
+            norm_limiter=norm_limiter,
+            norm_limiter_gamma=opt_cfg.get("norm_limiter_gamma", 1.01),
         )
     if name == "apollo":
         return Apollo(

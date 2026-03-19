@@ -2,12 +2,6 @@ suite_name: full_pretrain
 shared_config: configs/base.yaml
 
 experiments:
-  - name: sgd_momentum
-    overrides:
-      optimizer:
-        name: sgd
-      analysis:
-        enable_scaling_trace: false
 
   - name: adamw
     overrides:
@@ -16,17 +10,60 @@ experiments:
       analysis:
         enable_scaling_trace: true
 
-  - name: galore_rank_1_4
+  - name: elementwise
     overrides:
       optimizer:
-        name: galore
-        rank_ratio: 0.25
+        name: elementwise
+      analysis:
+        enable_scaling_trace: true
 
-  - name: galore_rank_1_8
+  - name: channelwise
     overrides:
       optimizer:
-        name: galore
-        rank_ratio: 0.125
+        name: channelwise
+        granularity: channel
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: tensorwise
+    overrides:
+      optimizer:
+        name: tensorwise
+        granularity: tensor
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: channelwise_nl
+    overrides:
+      optimizer:
+        name: channelwise_nl
+        granularity: channel
+        scale: 1.0
+        norm_limiter: true
+      analysis:
+        enable_scaling_trace: true
+
+  - name: grouped_rowwise_k2
+    overrides:
+      optimizer:
+        name: grouped_rowwise_k2
+        granularity: grouped_rowwise
+        num_groups: 2
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
+
+  - name: grouped_rowwise_k4
+    overrides:
+      optimizer:
+        name: grouped_rowwise_k4
+        granularity: grouped_rowwise
+        num_groups: 4
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true
 
   - name: apollo_rank_1_4
     overrides:
@@ -34,6 +71,7 @@ experiments:
         name: apollo
         rank_ratio: 0.25
         granularity: channel
+        projection: random
         scale: 1.0
       analysis:
         enable_scaling_trace: true
@@ -44,6 +82,7 @@ experiments:
         name: apollo
         rank_ratio: 0.125
         granularity: channel
+        projection: random
         scale: 1.0
       analysis:
         enable_scaling_trace: true
@@ -54,5 +93,18 @@ experiments:
         name: apollo_mini
         rank: 1
         granularity: tensor
-        scale: 64.0
+        projection: random
+        scale: 128.0
+      analysis:
+        enable_scaling_trace: true
 
+  - name: apollo_svd
+    overrides:
+      optimizer:
+        name: apollo
+        rank_ratio: 0.25
+        granularity: channel
+        projection: svd
+        scale: 1.0
+      analysis:
+        enable_scaling_trace: true

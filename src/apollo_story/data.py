@@ -4,7 +4,7 @@ from itertools import chain
 from typing import Any
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, IterableDataset, load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -14,33 +14,58 @@ def _prepare_split(
     config_name: str | None,
     split: str,
     cache_dir: str | None,
-) -> Dataset:
-    return load_dataset(dataset_name, config_name, split=split, cache_dir=cache_dir)
+    streaming: bool,
+) -> Dataset | IterableDataset:
+    return load_dataset(
+        dataset_name,
+        config_name,
+        split=split,
+        cache_dir=cache_dir,
+        streaming=streaming,
+    )
 
 
-def _select_subset(dataset: Dataset, limit: int | None) -> Dataset:
+def _select_subset(dataset: Dataset | IterableDataset, limit: int | None) -> Dataset | IterableDataset:
     if limit is None:
         return dataset
+    if isinstance(dataset, IterableDataset):
+        return dataset.take(limit)
     return dataset.select(range(min(limit, len(dataset))))
+
+
+def _set_torch_format(dataset: Dataset | IterableDataset) -> Dataset | IterableDataset:
+    if isinstance(dataset, IterableDataset):
+        return dataset.with_format("torch")
+    dataset.set_format(type="torch", columns=["input_ids", "labels"])
+    return dataset
 
 
 def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, Any]:
     ds_cfg = config["dataset"]
-    tokenizer = AutoTokenizer.from_pretrained(ds_cfg["tokenizer_name"], use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        ds_cfg["tokenizer_name"],
+        use_fast=True,
+        cache_dir=ds_cfg.get("cache_dir"),
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    train_streaming = bool(ds_cfg.get("streaming_train", False))
+    eval_streaming = bool(ds_cfg.get("streaming_eval", False))
 
     train_dataset = _prepare_split(
         ds_cfg["name"],
         ds_cfg.get("config_name"),
         ds_cfg["train_split"],
         ds_cfg.get("cache_dir"),
+        train_streaming,
     )
     eval_dataset = _prepare_split(
         ds_cfg["name"],
         ds_cfg.get("config_name"),
         ds_cfg["eval_split"],
         ds_cfg.get("cache_dir"),
+        eval_streaming,
     )
     train_dataset = _select_subset(train_dataset, ds_cfg.get("max_train_examples"))
     eval_dataset = _select_subset(eval_dataset, ds_cfg.get("max_eval_examples"))
@@ -62,40 +87,41 @@ def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, A
         chunks = [flat[i : i + seq_len] for i in range(0, total, seq_len)]
         return {"input_ids": chunks, "labels": [chunk[:] for chunk in chunks]}
 
-    train_tokenized = train_dataset.map(
-        tokenize_batch,
-        batched=True,
-        remove_columns=train_dataset.column_names,
-        num_proc=num_proc,
-        desc="Tokenizing train split",
-    )
-    eval_tokenized = eval_dataset.map(
-        tokenize_batch,
-        batched=True,
-        remove_columns=eval_dataset.column_names,
-        num_proc=num_proc,
-        desc="Tokenizing eval split",
-    )
-    train_grouped = train_tokenized.map(
-        group_texts,
-        batched=True,
-        num_proc=num_proc,
-        desc="Packing train split",
-    )
-    eval_grouped = eval_tokenized.map(
-        group_texts,
-        batched=True,
-        num_proc=num_proc,
-        desc="Packing eval split",
-    )
+    train_map_kwargs = {
+        "batched": True,
+        "remove_columns": train_dataset.column_names,
+        "desc": "Tokenizing train split",
+    }
+    eval_map_kwargs = {
+        "batched": True,
+        "remove_columns": eval_dataset.column_names,
+        "desc": "Tokenizing eval split",
+    }
+    if not isinstance(train_dataset, IterableDataset):
+        train_map_kwargs["num_proc"] = num_proc
+    if not isinstance(eval_dataset, IterableDataset):
+        eval_map_kwargs["num_proc"] = num_proc
 
-    train_grouped.set_format(type="torch", columns=["input_ids", "labels"])
-    eval_grouped.set_format(type="torch", columns=["input_ids", "labels"])
+    train_tokenized = train_dataset.map(tokenize_batch, **train_map_kwargs)
+    eval_tokenized = eval_dataset.map(tokenize_batch, **eval_map_kwargs)
+
+    pack_train_kwargs = {"batched": True, "desc": "Packing train split"}
+    pack_eval_kwargs = {"batched": True, "desc": "Packing eval split"}
+    if not isinstance(train_tokenized, IterableDataset):
+        pack_train_kwargs["num_proc"] = num_proc
+    if not isinstance(eval_tokenized, IterableDataset):
+        pack_eval_kwargs["num_proc"] = num_proc
+
+    train_grouped = train_tokenized.map(group_texts, **pack_train_kwargs)
+    eval_grouped = eval_tokenized.map(group_texts, **pack_eval_kwargs)
+
+    train_grouped = _set_torch_format(train_grouped)
+    eval_grouped = _set_torch_format(eval_grouped)
 
     train_loader = DataLoader(
         train_grouped,
         batch_size=config["training"]["batch_size"],
-        shuffle=True,
+        shuffle=not isinstance(train_grouped, IterableDataset),
         num_workers=ds_cfg.get("num_workers", 0),
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
@@ -109,4 +135,3 @@ def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, A
         drop_last=False,
     )
     return train_loader, eval_loader, tokenizer
-
