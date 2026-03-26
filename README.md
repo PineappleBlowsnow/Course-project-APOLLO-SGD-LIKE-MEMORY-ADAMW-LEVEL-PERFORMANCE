@@ -1,21 +1,14 @@
-# APOLLO Poster Reproduction
+# APOLLO Paper Reproduction
 
-This repository contains the training, benchmarking, plotting, and analysis code used for the APOLLO poster experiments.
+This repository contains the training, benchmarking, plotting, and analysis code used to evaluate the claim that Approximated Gradient Scaling for Memory Efficient LLM Optimization (APOLLO) achieves AdamW-level performance with lower memory usage. The original paper is: https://arxiv.org/pdf/2412.05270. 
 
-## Experiment Status
+The current default setup is centered on small LLaMA-style models:
 
-Experiments already run for the current poster workflow:
-
-- pretraining: `LLaMA-60M` on `TinyStories`
-- pretraining: `nanoGPT 40M` on `TinyStories`
-- pretraining: `nanoGPT 130M` on `WikiText`
+- pretraining: `LLaMA-60M` on `TinyStories`; `nanoGPT 40M` on `TinyStories`; `nanoGPT 130M` on `WikiText`. 
 - optimizer diagnostics: scaling traces, memory profiling, step-time profiling, and directional sharpness
+- finetuning: `LLaMA-60M` on `ARC-Easy` / `ARC-Challenge` (We didn't conduct finetuning experiments)
 
-Experiments defined in the repo but not run in the current poster workflow:
-
-- finetuning: `LLaMA-60M` on `ARC-Easy` / `ARC-Challenge`
-
-Legacy GPT-style configs are still present under `configs/base.yaml` and older suites remain available for reference.
+Legacy GPT-style configs are still present under `configs/base.yaml` and some older suites, but the main maintained path is the LLaMA-60M workflow.
 
 ## Install
 
@@ -57,7 +50,7 @@ This suite runs:
 
 and produces convergence curves, validation curves, scaling-ratio plots, Pareto plots, and `table2_like.csv`.
 
-###  Microbenchmarks
+###  Memory analysis and OOM test
 
 Default microbenchmark:
 
@@ -104,8 +97,6 @@ python scripts/analyze_sharpness.py --suite-dir results_table2_llama60/full_pret
 python scripts/make_table10.py --suite-dir results_table2_llama60/full_pretrain
 ```
 
-## Experiments Not Run
-
 ### Finetuning
 
 ```bash
@@ -113,7 +104,7 @@ python scripts/run_suite.py --suite configs/suites/finetune_llama60_arc.yaml --o
 python scripts/make_plots.py --results-root results/finetune_llama60_arc
 ```
 
-This suite defines ARC-Easy / ARC-Challenge finetuning for `adamw` and `apollo_mini`, but it is not part of the current run set summarized above.
+This runs ARC-Easy / ARC-Challenge finetuning for `adamw` and `apollo_mini`.
 
 ## Resume Support
 
@@ -157,26 +148,3 @@ Generated outputs are written to:
 - `<root>/figures/table7_like.csv`
 - `<root>/figures/table10_like.csv`
 
-## Poster Assets
-
-Copy generated figures into the poster assets directory:
-
-```bash
-python scripts/build_poster_assets.py --results-root results/table2_llama60
-```
-
-This copies files from:
-
-- `results/.../figures`
-
-into:
-
-- `poster/assets/generated`
-
-## Notes
-
-- The default base config is [configs/base_llama60_pretrain.yaml](C:/Users/yj/OneDrive/coope/MVA/1%20Training%20and%20Deploying%20Large-Scale%20Models/project/configs/base_llama60_pretrain.yaml).
-- `table10` / sharpness analysis uses saved `analysis_step_*.pt` checkpoints. Newer checkpoints include both model and optimizer state; older checkpoints may fall back to gradient-based directional sharpness.
-- Scaling-factor plotting was corrected so the Figure-4-style theory lines now use `1/2` for rank `1/4n` and `1/sqrt(8)` for rank `1/8n`.
-- In notebook / Colab environments, setting `MPLBACKEND=Agg` is recommended when generating plots non-interactively.
-- The scaling-ratio diagnostic is useful as a sanity check, but in the reduced LLaMA-60M + TinyStories setup it does not quantitatively match the original paper.
