@@ -1,5 +1,5 @@
 suite_name: oom_story
-shared_config: configs/base_llama60_c4.yaml
+shared_config: configs/base_llama60_pretrain.yaml
 
 experiments:
   - name: adamw_oom_story

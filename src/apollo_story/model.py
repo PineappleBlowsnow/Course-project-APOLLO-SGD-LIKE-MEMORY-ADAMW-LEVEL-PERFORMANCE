@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Literal
 
 import torch
@@ -193,6 +194,7 @@ class LLaMAAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.dropout = config.dropout
         self.rope_theta = config.rope_theta
+        self.force_eager_attention = False
         self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -204,14 +206,27 @@ class LLaMAAttention(nn.Module):
         k = self.k_proj(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         q, k = _apply_rope(q, k, positions, self.rope_theta)
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=True,
-        )
+        if getattr(self, "force_eager_attention", False):
+            scale = 1.0 / math.sqrt(self.head_dim)
+            scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            scores = scores.masked_fill(causal_mask, float("-inf"))
+            attn = torch.softmax(scores, dim=-1)
+            if self.training and self.dropout > 0.0:
+                attn = F.dropout(attn, p=self.dropout)
+            y = torch.matmul(attn, v)
+        else:
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+            )
         y = y.transpose(1, 2).contiguous().view(batch, seq_len, channels)
         return self.o_proj(y)
 

@@ -1,0 +1,82 @@
+seed: 42
+output_root: results
+experiment_name: base
+run_kind: finetune_mc
+
+dataset:
+  tokenizer_name: hf-internal-testing/llama-tokenizer
+  cache_dir: /content/drive/MyDrive/hf_cache
+  sequence_length: 256
+  num_workers: 0
+
+model:
+  type: llama
+  vocab_size: 32000
+  block_size: 256
+  n_layer: 8
+  n_head: 8
+  n_embd: 512
+  intermediate_size: 1376
+  dropout: 0.0
+  bias: false
+  rope_theta: 10000.0
+  rms_norm_eps: 1.0e-6
+
+task:
+  name: arc_easy
+  dataset_name: allenai/ai2_arc
+  config_name: ARC-Easy
+  train_split: train
+  eval_split: validation
+  init_checkpoint: null
+  max_train_examples: null
+  max_eval_examples: null
+  eval_batch_size: 4
+
+training:
+  device: auto
+  batch_size: 16
+  grad_accum_steps: 1
+  epochs: 3
+  max_steps: null
+  learning_rate: 3.0e-4
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  momentum: 0.9
+  eps: 1.0e-8
+  warmup_steps: 25
+  min_lr_ratio: 0.1
+  max_grad_norm: 1.0
+  mixed_precision: bf16
+  compile: false
+  log_interval: 10
+  eval_interval: 50
+  eval_batches: 0
+  save_interval: 250
+  save_analysis_steps: []
+  timing_window_steps: 0
+
+optimizer:
+  name: adamw
+  rank_ratio: 0.25
+  rank: null
+  granularity: channel
+  projection: random
+  projection_update_gap: 200
+  scale: 128.0
+  norm_limiter: true
+  norm_limiter_gamma: 1.01
+  num_groups: 1
+
+analysis:
+  track_param_names: []
+  scaling_log_steps: []
+  enable_scaling_trace: false
+  enable_memory_profile: false
+  enable_step_timing: false
+  enable_sharpness_online: false
+  sharpness_steps: []
+  sharpness_num_batches: 0
+
+benchmark:
+  enabled: false

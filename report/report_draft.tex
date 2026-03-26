@@ -1,13 +1,15 @@
-\documentclass[11pt]{article}
+\documentclass[10pt]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
-\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{amsmath, amssymb}
 \usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{xcolor}
 \usepackage{enumitem}
+\usepackage{microtype}
 
 \hypersetup{
   colorlinks=true,
@@ -16,7 +18,10 @@
   urlcolor=blue!60!black,
 }
 
-\title{APOLLO in a Reduced Setting:\\Memory-Efficient Adaptive Updates for Small Transformer Pre-Training}
+\setlist[itemize]{leftmargin=1.3em, topsep=2pt, itemsep=1pt}
+
+\title{When Does APOLLO Transfer?\\
+Success on LLaMA-60M, Failure Modes on Reduced GPT Pre-training}
 \author{Author Name}
 \date{\today}
 
@@ -24,10 +29,16 @@
 \maketitle
 
 \begin{abstract}
-This report studies the central idea behind APOLLO: adaptive updates for Transformer pre-training contain substantial redundancy, so the element-wise scaling rule of AdamW can be coarsened and then approximated in a low-rank subspace without a large loss in training quality. Our goal is not to reproduce the full MLSys-scale setup of the paper, but to verify the claim in a reduced GPT-style setting with public datasets and limited compute. In particular, we focus on the trade-off between optimizer-state memory and training quality, and ask whether APOLLO-like updates can reduce optimizer memory substantially while remaining close to AdamW in validation loss.
+APOLLO (\textbf{A}pproximated Gradient Scaling for Memory Efficient \textbf{L}LM \textbf{O}ptimization) argues that AdamW's element-wise adaptivity is redundant and can be replaced by coarse structured scaling estimated in a low-rank auxiliary space. We revisit this claim in a reduced but controlled setting. Our main positive result is on \textbf{LLaMA-60M + TinyStories}: APOLLO rank-$1/4$ and rank-$1/8$ preserve the paper's core memory story, namely optimizer-state cost that scales as roughly $1/\text{rank}$ of AdamW while remaining reasonably close in validation perplexity. The surprise is that this behavior \emph{does not transfer universally}. On \textbf{NanoGPT-40M + TinyStories}, structured scaling all fail to approach AdamW. The resulting story is not ``APOLLO always works,'' but rather: \emph{APOLLO can work well on some architectures and data regimes, yet its edge is not universal}. This reframes the question from ``does APOLLO save memory?'' to ``under what failure modes does that memory advantage stop buying AdamW-like optimization?'' 
 \end{abstract}
 
-\section{Introduction}
+\section{Motivation}
+APOLLO is attractive because it targets a real bottleneck: AdamW stores two full-size moment tensors, so optimizer states alone scale linearly with model size and quickly become a dominant memory term \cite{kingma2014adam, apollo2025}. The paper's key observation is simple: even if the \emph{update rule} can be coarsened from element-wise scaling to channel-wise or tensor-wise scaling, that alone does not save dynamic memory unless the optimizer states themselves are also maintained in a lower-dimensional space. APOLLO closes this gap by estimating structured scaling from a low-rank auxiliary space built with random projection instead of expensive SVD \cite{apollo2025}.
+
+The motivating question of this report is therefore sharper than a direct reproduction: \textbf{if APOLLO is theoretically superior, why has it not displaced AdamW as the default?} Our working hypothesis is that the answer is not just ``engineering inertia,'' but \emph{universality}. Memory savings are meaningful only if the optimizer remains stable across architectures, datasets, and scale regimes. We therefore focus on failure modes.
+
+\iffalse
+\section{Legacy Introduction Draft}
 \paragraph{Why optimizer memory matters.}
 AdamW remains the default optimizer for Transformer training because its adaptive first- and second-moment statistics stabilize optimization and usually outperform purely first-order methods such as SGD on language models \cite{kingma2014adam, loshchilov2019decoupled, zhang2024transformers}. However, this stability comes with a substantial memory cost. For a parameter tensor $W_t$ with gradient $G_t = \nabla_W \mathcal{L}(W_t)$, AdamW maintains two full-size state tensors, the first moment $M_t$ and the second moment $V_t$:
 \begin{align}
@@ -101,22 +112,107 @@ This changes the optimizer-state memory from $2mn$ to roughly $2nr$ for a matrix
 The paper's theoretical support is not a generic convergence theorem for the entire optimizer, but rather a sequence of approximation guarantees showing that random projection preserves the key norms needed to estimate the structured scaling factors. The analysis argues that if the projected gradients preserve channel-wise first- and second-moment norms sufficiently well, then the resulting low-rank scaling factors remain close to those of the full-rank structured optimizer \cite{apollo2025}. This is the key justification for replacing SVD with random projection: APOLLO does not try to reconstruct the full gradient exactly, but only the coarse adaptive scaling needed to modulate the gradient update.
 
 \paragraph{Our claim in a reduced setting.}
-The original paper evaluates APOLLO on LLaMA models up to 7B parameters and C4 pre-training, which is outside the scope of a small class project. Our goal is therefore narrower: in a reduced GPT-style setup on public datasets and a much smaller model, we test whether an APOLLO-like optimizer can substantially reduce optimizer-state memory while keeping training quality reasonably close to AdamW. We also use the reduced setting to separate three logically distinct questions:
+The original paper evaluates APOLLO on LLaMA models up to 7B parameters and large-scale pre-training, which is outside the scope of a small class project. Our goal is therefore narrower: in a reduced setup on public datasets and much smaller models, we test whether an APOLLO-like optimizer can substantially reduce optimizer-state memory while keeping training quality reasonably close to AdamW. We also use the reduced setting to separate three logically distinct questions:
 \begin{enumerate}[leftmargin=1.5em]
   \item Is element-wise adaptive scaling redundant enough that channel-wise or tensor-wise scaling remains viable?
   \item Does structured scaling alone save memory in practice?
   \item Does low-rank random projection provide the missing step that converts structured scaling into a genuinely memory-efficient optimizer?
 \end{enumerate}
 This decomposition is important for interpreting our experiments: pure structured updates are best viewed as a sanity check for the \emph{mechanism}, while APOLLO is the part that turns this mechanism into a memory-efficient training method.
+\fi
 
-\section{Experimental Setup}
-\textit{To be completed. This section will describe the reduced model setup, datasets, optimizers, metrics, and the exact claims tested.}
+\section{Methodology}
+\paragraph{Why pre-training from scratch?}
+We emphasize pre-training instead of fine-tuning. Fine-tuning often starts near a good basin of attraction, which can mask optimizer instability; pre-training from scratch stresses the entire trajectory and is therefore better for testing whether APOLLO remains reliable away from a local optimum.
+
+\paragraph{Experimental matrix.}
+We ran three reduced pre-training studies:
+\begin{itemize}
+  \item \textbf{Exp.~1}: LLaMA-60M on TinyStories; optimizers: AdamW, APOLLO rank-$1/4$, APOLLO rank-$1/8$, plus APOLLO-Mini as a stress test.
+  \item \textbf{Exp.~2}: NanoGPT-40M on TinyStories; optimizers: AdamW, APOLLO rank-$1/4$, naive channel-wise scaling, and group-wise variants with $K=2,4$.
+  \item \textbf{Exp.~3}: NanoGPT-130M on WikiText; optimizers: AdamW and channel-wise structured scaling.
+\end{itemize}
+
+\paragraph{Metrics.}
+The main optimization metric is validation perplexity. For memory, we distinguish \emph{optimizer-state memory} from \emph{end-to-end peak GPU memory}. This distinction matters: the APOLLO paper's Table 2 reports \emph{optimization states only} \cite{apollo2025}. Some of our earlier benchmark plots mixed optimizer-specific maximum batch size with peak GPU memory; those plots are not used as headline evidence here. Instead, for the main table we report \emph{normalized optimizer-state memory implied by the rank reduction}, which is the quantity directly tied to the paper's claim. Throughput is discussed only qualitatively: in principle lower optimizer-state memory can improve tokens/s by enabling larger batches or more parallelism, but in our small-scale A100 runs compute often dominates and APOLLO's extra optimizer-step overhead can erase that benefit.
 
 \section{Results}
-\textit{To be completed. This section will include training curves, validation curves, memory breakdowns, and the comparison between AdamW and APOLLO-style updates.}
+\subsection{Exp.~1: LLaMA-60M + TinyStories is a partial success}
+This is the strongest result in the project. The training curves show that both APOLLO rank-$1/4$ and rank-$1/8$ remain stable throughout training, unlike APOLLO-Mini, and track AdamW much more closely than the failed NanoGPT runs.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{assets/llama60_tinystories_convergence.png}
+  \caption{Training loss on LLaMA-60M + TinyStories. APOLLO rank-$1/4$ and rank-$1/8$ remain stable and follow AdamW qualitatively, while APOLLO-Mini exhibits large early spikes and never recovers fully.}
+  \label{fig:llama-convergence}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Optimizer & Best ppl. $\downarrow$ & Gap vs. AdamW & Opt.-state mem. \\
+\midrule
+AdamW & 3.61 & -- & $1.00\times$ \\
+APOLLO rank-$1/4$ & 4.13 & +14.5\% & $\approx 0.25\times$ \\
+APOLLO rank-$1/8$ & 4.13 & +14.6\% & $\approx 0.125\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Exp.~1 summary. Perplexities come from the TinyStories LLaMA-60M runs. Memory is reported as \emph{normalized optimizer-state memory}, not peak GPU memory; this matches the paper's Table 2 logic better than our early benchmark plots.}
+\label{tab:llama-success}
+\end{table}
+
+Two points matter. First, the memory story \emph{does} survive the reduced setup: reducing the rank by a factor of 4 or 8 reduces optimizer-state cost proportionally. Second, the optimization story remains credible: APOLLO is not identical to AdamW, but it stays in the same regime rather than diverging catastrophically. This is close enough to the paper's core claim to count as a meaningful validation in a 60M setting. The rank ablation is also informative: rank-$1/8$ gives almost the same perplexity as rank-$1/4$, suggesting that on this architecture the structured scaling estimate is robust to further compression.
+
+\subsection{APOLLO-Mini fails in the same LLaMA setting}
+The exception inside Exp.~1 is APOLLO-Mini. With scales 128 and 16, we consistently observed violent early jumps in training loss and persistent underperformance. This is not just cosmetic noise: in Fig.~\ref{fig:llama-convergence}, APOLLO-Mini starts with severe spikes and settles at a much worse loss floor than AdamW or high-rank APOLLO.
+
+We interpret this as a \emph{hyperparameter-sensitivity failure mode}, not as evidence against the entire APOLLO family. APOLLO-Mini combines rank~1 projection with tensor-wise scaling, making it the most aggressive approximation in the paper. The original paper also treats APOLLO-Mini separately and retunes its hyperparameters for strong results \cite{apollo2025}. In our reduced setup, rank~1 appears too coarse to estimate reliable adaptive scaling early in training.
+
+\subsection{Exp.~2: NanoGPT-40M + TinyStories breaks the main claim}
+The story changes sharply on NanoGPT. AdamW reaches best perplexity 5.23, while APOLLO rank-$1/4$ degrades to 14.10. More importantly, the mechanistic sanity checks also fail: naive channel-wise scaling reaches 11.71, and the grouped variants with $K=2$ and $K=4$ remain around 11.6 and 11.2. In other words, even before low-rank projection enters the picture, the \emph{structured-scaling hypothesis itself} is much weaker on this architecture. That is a crucial negative result because it suggests the failure is not merely due to random projection noise.
+
+This experiment reframes the paper's claim. On LLaMA, coarse structured adaptivity seems sufficient; on NanoGPT, it does not. The immediate hypothesis is that APOLLO benefits from architectural properties that are absent or weaker in NanoGPT, notably RMSNorm, RoPE, and the LLaMA-style MLP. Those design choices may produce gradients whose cross-channel scale structure is easier to approximate with a low-rank auxiliary space.
+
+\subsection{Exp.~3: NanoGPT-130M + WikiText is even less favorable}
+The 130M NanoGPT + WikiText run strengthens the non-universality story. AdamW reaches best perplexity 180.97 whereas channel-wise structured scaling degrades to 429.85. This setting is also confounded by rapid overfitting: the model is large relative to the dataset, yet AdamW still dominates. If APOLLO were exploiting only parameter redundancy, this would have been a friendlier setting; instead, it fails again. The implication is that optimizer-state compression alone is not enough---the \emph{quality of the structured scaling estimate} matters, and that quality is architecture- and data-dependent.
+
+\subsection{Diagnostics we explicitly \emph{do not} promote to headline evidence}
+Several diagnostic plots were useful during development but should not anchor the report:
+\begin{itemize}
+  \item \textbf{Pareto / peak-memory plots.} Earlier code compared peak memory at each optimizer's own maximum runnable batch size, which is not an apples-to-apples memory comparison. We corrected the fixed-batch merge path in plotting, but the report still prioritizes optimizer-state memory over raw peak memory.
+  \item \textbf{Throughput plots.} In our small models, A100 runs are often compute-bound, so APOLLO's lower state memory does not automatically translate into higher tokens/s. A fair throughput claim requires rerunning benchmarks at the \emph{same fixed batch size} or the \emph{same memory budget}.
+  \item \textbf{Scaling-ratio and sharpness diagnostics.} We found and fixed implementation issues in these diagnostics (scalar/list plotting mismatch, and second-order gradients through fused attention). Their current outputs should be treated as secondary evidence until rerun cleanly from checkpoints.
+\end{itemize}
 
 \section{Discussion}
-\textit{To be completed. This section will discuss agreement and disagreement with the original paper, especially the difference between structured scaling as a hypothesis and APOLLO as a practical optimizer.}
+\paragraph{Why might LLaMA help APOLLO while NanoGPT hurts it?}
+Our current hypothesis is that APOLLO depends on \emph{how compressible the adaptive scaling rule is}. LLaMA's RMSNorm and RoPE may regularize activation and gradient statistics in ways that make channel-wise scaling more coherent across layers. In contrast, NanoGPT's LayerNorm + learned positional embedding pipeline may produce gradients whose useful anisotropy is more parameter-local, so coarsening to channel or group scale discards too much information. This is only a hypothesis, but it fits the empirical split between Exp.~1 and Exp.~2.
+
+\paragraph{Why structured scaling alone is not enough.}
+Exp.~2 is especially informative here. The group-wise tests with $K=2$ and $K=4$ were meant to test whether channel-wise scaling simply grouped parameters too aggressively. They did not trend back toward AdamW. That suggests the failure is deeper than an unfortunate grouping granularity: on NanoGPT, the element-wise scaling itself may carry optimization information that coarse grouping loses.
+
+\paragraph{Connection to the course.}
+This project touches all four parts of the course:
+\begin{itemize}
+  \item \textbf{Lecture 1 (optimization).} The core question is whether AdamW's adaptive moments are redundant or essential.
+  \item \textbf{Lecture 2 (architectures).} The LLaMA vs. NanoGPT contrast suggests optimizer behavior is architecture-dependent.
+  \item \textbf{Lecture 3 (systems).} The entire motivation is memory as a systems bottleneck; however, memory savings only matter if they convert into usable throughput or larger feasible batch sizes.
+  \item \textbf{Lecture 4 (evaluation and deployment constraints).} The project shows why careful metric definition matters: optimizer-state memory, peak memory, and throughput are different quantities and should not be conflated.
+\end{itemize}
+
+\section{Quick Experiments That Would Most Improve the Story}
+The current evidence is already strong enough for a coherent report, but four short follow-ups would bridge the remaining theory--practice gap:
+\begin{itemize}
+  \item \textbf{Fixed-batch microbenchmark on A100.} Re-run AdamW vs. APOLLO rank-$1/4$ vs. rank-$1/8$ at the \emph{same} batch size and sequence length. Report optimizer-state memory, fixed-batch peak memory, backward time, and optimizer-step time separately.
+  \item \textbf{Cross-over architecture/data test.} Run \textbf{LLaMA-60M on WikiText} for 1k--2k steps. This isolates architecture from dataset and directly tests whether the LLaMA success is mostly architectural.
+  \item \textbf{APOLLO-Mini sanity sweep.} Keep LLaMA-60M + TinyStories fixed and sweep only APOLLO-Mini scale and learning rate, e.g.\ scale $\in \{1,4,16\}$ and lr $\in \{10^{-3}, 3\times 10^{-3}, 10^{-2}\}$. This is cheap and directly tests the ``sensitive hyperparameter'' explanation.
+  \item \textbf{Three-seed robustness check.} Repeat Exp.~1 and Exp.~2 with three seeds. If the LLaMA/NanoGPT split persists, the universality argument becomes much stronger.
+\end{itemize}
+
+\section{Conclusion}
+The most honest conclusion is mixed but useful. We \emph{did} validate APOLLO's core idea in a reduced setting: on LLaMA-60M + TinyStories, APOLLO rank-$1/4$ and rank-$1/8$ substantially reduce optimizer-state memory while remaining close to AdamW in validation perplexity. But we also found a more interesting negative result: this behavior is not universal. The same story breaks on NanoGPT-40M + TinyStories, and it breaks again on NanoGPT-130M + WikiText. APOLLO-Mini is especially unstable. Therefore the right takeaway is not that APOLLO ``beats AdamW'' in general, but that APOLLO is a \emph{conditional win}: it is compelling when the architecture and training regime make structured adaptive scaling compressible, and much less so otherwise. That is exactly the kind of theory--practice gap worth reporting.
 
 \begin{thebibliography}{99}
 
@@ -124,11 +220,6 @@ This decomposition is important for interpreting our experiments: pure structure
 Diederik P. Kingma and Jimmy Ba.
 \newblock Adam: A Method for Stochastic Optimization.
 \newblock \emph{arXiv preprint arXiv:1412.6980}, 2014.
-
-\bibitem{loshchilov2019decoupled}
-Ilya Loshchilov and Frank Hutter.
-\newblock Decoupled Weight Decay Regularization.
-\newblock \emph{International Conference on Learning Representations}, 2019.
 
 \bibitem{zhang2024transformers}
 Yuxin Zhang, Chen Chen, Ting Ding, et al.
@@ -142,13 +233,8 @@ Zhen Zhang, Hanqing Lu, et al.
 
 \bibitem{zhao2024galore}
 Jiawei Zhao, Zhenyu Zhang, Beidi Chen, et al.
-\newblock GaLore: Memory-Efficient {LLM} Training by Gradient Low-Rank Projection.
+\newblock GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection.
 \newblock \emph{ICML}, 2024.
-
-\bibitem{chen2024fira}
-Xinjie Chen, Kexin Feng, Chengyuan Li, et al.
-\newblock Fira: Can We Achieve Full-Rank Training of {LLMs} Under Low-Rank Constraint?
-\newblock \emph{arXiv preprint}, 2024.
 
 \bibitem{apollo2025}
 David Z. Pan, Hanqing Lu, Zhangyang Wang, and Jinwon Lee.

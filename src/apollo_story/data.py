@@ -15,6 +15,7 @@ def _prepare_split(
     split: str,
     cache_dir: str | None,
     streaming: bool,
+    trust_remote_code: bool,
 ) -> Dataset | IterableDataset:
     return load_dataset(
         dataset_name,
@@ -22,6 +23,7 @@ def _prepare_split(
         split=split,
         cache_dir=cache_dir,
         streaming=streaming,
+        trust_remote_code=trust_remote_code,
     )
 
 
@@ -52,6 +54,7 @@ def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, A
 
     train_streaming = bool(ds_cfg.get("streaming_train", False))
     eval_streaming = bool(ds_cfg.get("streaming_eval", False))
+    trust_remote_code = bool(ds_cfg.get("trust_remote_code", False))
 
     train_dataset = _prepare_split(
         ds_cfg["name"],
@@ -59,6 +62,7 @@ def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, A
         ds_cfg["train_split"],
         ds_cfg.get("cache_dir"),
         train_streaming,
+        trust_remote_code,
     )
     eval_dataset = _prepare_split(
         ds_cfg["name"],
@@ -66,6 +70,7 @@ def build_dataloaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, A
         ds_cfg["eval_split"],
         ds_cfg.get("cache_dir"),
         eval_streaming,
+        trust_remote_code,
     )
     train_dataset = _select_subset(train_dataset, ds_cfg.get("max_train_examples"))
     eval_dataset = _select_subset(eval_dataset, ds_cfg.get("max_eval_examples"))

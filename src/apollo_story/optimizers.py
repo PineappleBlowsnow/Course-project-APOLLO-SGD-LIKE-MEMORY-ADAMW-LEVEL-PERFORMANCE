@@ -90,6 +90,29 @@ class TraceableOptimizer(Optimizer):
         self._pending_traces = []
         return traces
 
+    def predicted_update_tensors(
+        self,
+        params: list[torch.Tensor],
+        grads: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        grad_by_param = {id(param): grad.detach().float() for param, grad in zip(params, grads)}
+        updates: dict[int, torch.Tensor] = {}
+        for group in self.param_groups:
+            for param in group["params"]:
+                grad = grad_by_param.get(id(param))
+                if grad is None:
+                    continue
+                updates[id(param)] = self._predicted_update_for_param(group, param, grad)
+        return [updates.get(id(param), torch.zeros_like(param, dtype=torch.float32)) for param in params]
+
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
     def _record_scaling(
         self,
         group: dict[str, Any],
@@ -163,6 +186,41 @@ def _apply_norm_limiter(update: torch.Tensor, state: dict[str, Any], enabled: bo
     return update
 
 
+def _predict_norm_limited_update(update: torch.Tensor, state: dict[str, Any], enabled: bool, gamma: float) -> torch.Tensor:
+    if not enabled:
+        return update
+    norm = torch.linalg.vector_norm(update).item()
+    prev = state.get("prev_update_norm")
+    if prev is not None and prev > 0.0 and norm > gamma * prev:
+        update = update * (gamma * prev / max(norm, 1e-12))
+    return update
+
+
+def _predict_adam_update(
+    grad: torch.Tensor,
+    state: dict[str, Any],
+    beta1: float,
+    beta2: float,
+    eps: float,
+) -> tuple[torch.Tensor, int]:
+    next_step = int(state.get("step", 0)) + 1
+    exp_avg = state.get("exp_avg")
+    exp_avg_sq = state.get("exp_avg_sq")
+    if exp_avg is None or exp_avg.shape != grad.shape:
+        exp_avg = torch.zeros_like(grad, dtype=torch.float32)
+    else:
+        exp_avg = exp_avg.detach().float()
+    if exp_avg_sq is None or exp_avg_sq.shape != grad.shape:
+        exp_avg_sq = torch.zeros_like(grad, dtype=torch.float32)
+    else:
+        exp_avg_sq = exp_avg_sq.detach().float()
+    exp_avg = exp_avg * beta1 + grad * (1.0 - beta1)
+    exp_avg_sq = exp_avg_sq * beta2 + grad * grad * (1.0 - beta2)
+    m_hat = exp_avg / (1.0 - beta1**next_step)
+    v_hat = exp_avg_sq / (1.0 - beta2**next_step)
+    return m_hat / (torch.sqrt(v_hat) + eps), next_step
+
+
 class SGDMomentum(TraceableOptimizer):
     def __init__(self, params, lr: float, momentum: float, weight_decay: float) -> None:
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay)
@@ -186,6 +244,22 @@ class SGDMomentum(TraceableOptimizer):
                 velocity.mul_(group["momentum"]).add_(grad)
                 param.add_(velocity.to(param.dtype), alpha=-group["lr"])
         return loss
+
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        state = self.state[param]
+        velocity = state.get("velocity")
+        if velocity is None or velocity.shape != grad.shape:
+            velocity = torch.zeros_like(grad, dtype=torch.float32)
+        else:
+            velocity = velocity.detach().float()
+        if group["weight_decay"] != 0.0:
+            grad = grad.add(param.detach().float(), alpha=group["weight_decay"])
+        return velocity * group["momentum"] + grad
 
 
 class AdamWTracked(TraceableOptimizer):
@@ -246,6 +320,22 @@ class AdamWTracked(TraceableOptimizer):
                 )
                 param.add_(update.to(param.dtype), alpha=-group["lr"])
         return loss
+
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        beta1, beta2 = group["betas"]
+        state = self.state[param]
+        update, _ = _predict_adam_update(grad, state, beta1, beta2, group["eps"])
+        return _predict_norm_limited_update(
+            update,
+            state,
+            group["norm_limiter"],
+            group["norm_limiter_gamma"],
+        )
 
 
 class StructuredAdam(TraceableOptimizer):
@@ -343,6 +433,50 @@ class StructuredAdam(TraceableOptimizer):
                 param.add_(update.to(param.dtype), alpha=-group["lr"])
         return loss
 
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        beta1, beta2 = group["betas"]
+        state = self.state[param]
+        elementwise_update, _ = _predict_adam_update(grad, state, beta1, beta2, group["eps"])
+
+        if grad.ndim < 2:
+            update = elementwise_update
+        else:
+            grad_matrix, meta = _flatten_and_orient(grad)
+            update_matrix, _ = _flatten_and_orient(elementwise_update)
+            if group["granularity"] == "tensor":
+                scale = _tensor_scale(update_matrix, grad_matrix, group["eps"]) * group["scale"]
+                structured_update = grad_matrix * scale
+            elif group["granularity"] == "grouped_rowwise":
+                scale = _grouped_rowwise_scale(
+                    update_matrix,
+                    grad_matrix,
+                    group["eps"],
+                    group["num_groups"],
+                ) * group["scale"]
+                rows, _ = grad_matrix.shape
+                row_indices = torch.arange(rows, device=grad_matrix.device)
+                row_groups = torch.div(
+                    row_indices * group["num_groups"],
+                    rows,
+                    rounding_mode="floor",
+                )
+                structured_update = grad_matrix * scale[row_groups]
+            else:
+                scale = _channel_scale(update_matrix, grad_matrix, group["eps"]) * group["scale"]
+                structured_update = grad_matrix * scale.unsqueeze(0)
+            update = _restore_orientation(structured_update, meta)
+        return _predict_norm_limited_update(
+            update,
+            state,
+            group["norm_limiter"],
+            group["norm_limiter_gamma"],
+        )
+
 
 class GaLore(TraceableOptimizer):
     def __init__(
@@ -416,6 +550,43 @@ class GaLore(TraceableOptimizer):
 
                 param.add_(update.to(param.dtype), alpha=-group["lr"])
         return loss
+
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        beta1, beta2 = group["betas"]
+        state = self.state[param]
+        next_step = int(state.get("step", 0)) + 1
+        if grad.ndim < 2:
+            update, _ = _predict_adam_update(grad, state, beta1, beta2, group["eps"])
+            return update
+
+        grad_matrix, meta = _flatten_and_orient(grad)
+        rows, _ = grad_matrix.shape
+        rank = _resolve_rank(rows, group["rank"], group["rank_ratio"])
+        projection = state.get("projection")
+        if projection is None or projection.shape != (rank, rows) or (next_step - 1) % group["projection_update_gap"] == 0:
+            projection = _svd_projection(grad_matrix, rank)
+        else:
+            projection = projection.detach().float()
+        low_rank_grad = projection @ grad_matrix
+        exp_avg_r = state.get("exp_avg_r")
+        exp_avg_sq_r = state.get("exp_avg_sq_r")
+        if exp_avg_r is None or exp_avg_r.shape != low_rank_grad.shape:
+            exp_avg_r = torch.zeros_like(low_rank_grad, dtype=torch.float32)
+            exp_avg_sq_r = torch.zeros_like(low_rank_grad, dtype=torch.float32)
+        else:
+            exp_avg_r = exp_avg_r.detach().float()
+            exp_avg_sq_r = exp_avg_sq_r.detach().float()
+        exp_avg_r = exp_avg_r * beta1 + low_rank_grad * (1.0 - beta1)
+        exp_avg_sq_r = exp_avg_sq_r * beta2 + low_rank_grad * low_rank_grad * (1.0 - beta2)
+        m_hat_r = exp_avg_r / (1.0 - beta1**next_step)
+        v_hat_r = exp_avg_sq_r / (1.0 - beta2**next_step)
+        update_low = m_hat_r / (torch.sqrt(v_hat_r) + group["eps"])
+        return _restore_orientation(projection.transpose(0, 1) @ update_low, meta)
 
 
 class Apollo(TraceableOptimizer):
@@ -520,6 +691,62 @@ class Apollo(TraceableOptimizer):
 
                 param.add_(update.to(param.dtype), alpha=-group["lr"])
         return loss
+
+    def _predicted_update_for_param(
+        self,
+        group: dict[str, Any],
+        param: torch.Tensor,
+        grad: torch.Tensor,
+    ) -> torch.Tensor:
+        beta1, beta2 = group["betas"]
+        state = self.state[param]
+        next_step = int(state.get("step", 0)) + 1
+        if grad.ndim < 2:
+            update, _ = _predict_adam_update(grad, state, beta1, beta2, group["eps"])
+            return update
+
+        grad_matrix, meta = _flatten_and_orient(grad)
+        rows, _ = grad_matrix.shape
+        rank = _resolve_rank(rows, group["rank"], group["rank_ratio"])
+        if group["projection"] == "random":
+            stored_seed = state.get("proj_seed")
+            if stored_seed is None:
+                stored_seed = 0
+            projection = _random_projection(rows, rank, grad_matrix.device, int(stored_seed))
+        elif group["projection"] == "svd":
+            projection = _svd_projection(grad_matrix, rank)
+        else:
+            raise ValueError(f"Unsupported projection type: {group['projection']}")
+
+        low_rank_grad = projection @ grad_matrix
+        exp_avg_r = state.get("exp_avg_r")
+        exp_avg_sq_r = state.get("exp_avg_sq_r")
+        if exp_avg_r is None or exp_avg_r.shape != low_rank_grad.shape:
+            exp_avg_r = torch.zeros_like(low_rank_grad, dtype=torch.float32)
+            exp_avg_sq_r = torch.zeros_like(low_rank_grad, dtype=torch.float32)
+        else:
+            exp_avg_r = exp_avg_r.detach().float()
+            exp_avg_sq_r = exp_avg_sq_r.detach().float()
+        exp_avg_r = exp_avg_r * beta1 + low_rank_grad * (1.0 - beta1)
+        exp_avg_sq_r = exp_avg_sq_r * beta2 + low_rank_grad * low_rank_grad * (1.0 - beta2)
+        m_hat_r = exp_avg_r / (1.0 - beta1**next_step)
+        v_hat_r = exp_avg_sq_r / (1.0 - beta2**next_step)
+        adaptive_r = m_hat_r / (torch.sqrt(v_hat_r) + group["eps"])
+
+        if group["granularity"] == "tensor":
+            scale = _tensor_scale(adaptive_r, low_rank_grad, group["eps"]) * group["scale"]
+            update_matrix = grad_matrix * scale
+        else:
+            scale = _channel_scale(adaptive_r, low_rank_grad, group["eps"]) * group["scale"]
+            update_matrix = grad_matrix * scale.unsqueeze(0)
+
+        update_matrix = _predict_norm_limited_update(
+            update_matrix,
+            state,
+            group["norm_limiter"],
+            group["norm_limiter_gamma"],
+        )
+        return _restore_orientation(update_matrix, meta)
 
 
 class ApolloMini(Apollo):

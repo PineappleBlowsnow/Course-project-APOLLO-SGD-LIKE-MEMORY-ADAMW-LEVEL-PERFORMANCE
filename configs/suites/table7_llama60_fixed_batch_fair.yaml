@@ -1,0 +1,71 @@
+suite_name: microbench
+shared_config: configs/base_llama60_pretrain.yaml
+
+experiments:
+  - name: adamw_bench
+    overrides:
+      run_kind: benchmark
+      benchmark:
+        enabled: true
+        mode: fixed_batch
+        fixed_batch_size: 128
+        warmup_steps: 100
+        measure_steps: 400
+        profile_memory: true
+        memory_profile_batch_size: 128
+      optimizer:
+        name: adamw
+
+  - name: apollo_rank_1_4_bench
+    overrides:
+      run_kind: benchmark
+      benchmark:
+        enabled: true
+        mode: fixed_batch
+        fixed_batch_size: 128
+        warmup_steps: 100
+        measure_steps: 400
+        profile_memory: true
+        memory_profile_batch_size: 128
+      optimizer:
+        name: apollo
+        rank_ratio: 0.25
+        granularity: channel
+        projection: random
+        scale: 1.0
+
+  - name: apollo_rank_1_8_bench
+    overrides:
+      run_kind: benchmark
+      benchmark:
+        enabled: true
+        mode: fixed_batch
+        fixed_batch_size: 128
+        warmup_steps: 100
+        measure_steps: 400
+        profile_memory: true
+        memory_profile_batch_size: 128
+      optimizer:
+        name: apollo
+        rank_ratio: 0.125
+        granularity: channel
+        projection: random
+        scale: 1.0
+
+  - name: apollo_mini_bench
+    overrides:
+      run_kind: benchmark
+      benchmark:
+        enabled: true
+        mode: fixed_batch
+        fixed_batch_size: 128
+        warmup_steps: 100
+        measure_steps: 400
+        profile_memory: true
+        memory_profile_batch_size: 128
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        projection: random
+        scale: 128.0

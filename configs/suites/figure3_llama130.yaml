@@ -1,5 +1,5 @@
 suite_name: full_pretrain
-shared_config: configs/base_llama130_c4.yaml
+shared_config: configs/base_llama130_pretrain.yaml
 
 experiments:
   - name: elementwise

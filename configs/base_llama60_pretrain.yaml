@@ -1,0 +1,95 @@
+seed: 42
+output_root: results
+experiment_name: base
+run_kind: train
+
+dataset:
+  name: roneneldan/TinyStories
+  config_name: null
+  train_split: train
+  eval_split: validation
+  text_field: text
+  tokenizer_name: hf-internal-testing/llama-tokenizer
+  cache_dir: /content/drive/MyDrive/hf_cache
+  max_train_examples: null
+  max_eval_examples: 2000
+  sequence_length: 256
+  num_proc: 1
+  num_workers: 2
+  streaming_train: false
+  streaming_eval: false
+  trust_remote_code: false
+
+
+model:
+  type: llama
+  vocab_size: 32000
+  block_size: 256
+  n_layer: 8
+  n_head: 8
+  n_embd: 512
+  intermediate_size: 1376
+  dropout: 0.0
+  bias: false
+  rope_theta: 10000.0
+  rms_norm_eps: 1.0e-6
+
+training:
+  device: auto
+  batch_size: 128
+  grad_accum_steps: 4
+  max_steps: 10000
+  learning_rate: 0.003
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  momentum: 0.9
+  eps: 1.0e-8
+  warmup_steps: 1000
+  min_lr_ratio: 0.1
+  max_grad_norm: 1.0
+  mixed_precision: bf16
+  compile: false
+  log_interval: 10
+  eval_interval: 1000
+  eval_batches: 100
+  save_interval: 2500
+  save_analysis_steps: [2500, 5000, 10000]
+  timing_window_steps: 500
+
+optimizer:
+  name: adamw
+  rank_ratio: 0.25
+  rank: null
+  granularity: channel
+  projection: random
+  projection_update_gap: 200
+  scale: 1.0
+  norm_limiter: true
+  norm_limiter_gamma: 1.01
+  num_groups: 1
+
+analysis:
+  track_param_names:
+    - model.layers.0.self_attn.q_proj.weight
+    - model.layers.3.self_attn.q_proj.weight
+    - model.layers.7.self_attn.q_proj.weight
+  scaling_log_steps: [2500, 5000, 10000]
+  enable_scaling_trace: false
+  enable_memory_profile: false
+  enable_step_timing: true
+  enable_sharpness_online: false
+  sharpness_steps: [1000, 2500, 5000, 10000]
+  sharpness_num_batches: 1
+
+benchmark:
+  enabled: false
+  synthetic: true
+  mode: max_batch
+  fixed_batch_size: null
+  initial_batch_size: 2
+  batch_size_cap: 512
+  warmup_steps: 10
+  measure_steps: 250
+  memory_budget_gb: null
+  profile_memory: true
+  memory_profile_batch_size: 128

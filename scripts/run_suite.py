@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from apollo_story.benchmark import benchmark_experiment
 from apollo_story.config import deep_update, load_yaml
+from apollo_story.finetune import finetune_experiment
 from apollo_story.train import train_experiment
 
 
@@ -25,8 +26,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    suite = load_yaml(args.suite)
-    shared = load_yaml(suite["shared_config"])
+    suite_path = Path(args.suite).resolve()
+    suite = load_yaml(suite_path)
+    shared_ref = Path(suite["shared_config"])
+    if not shared_ref.is_absolute():
+        suite_relative = (suite_path.parent / shared_ref).resolve()
+        project_relative = (PROJECT_ROOT / shared_ref).resolve()
+        shared_ref = suite_relative if suite_relative.exists() else project_relative
+    shared = load_yaml(shared_ref)
     suite_root = Path(args.output_root) / suite["suite_name"]
 
     for experiment in suite["experiments"]:
@@ -36,6 +43,8 @@ def main() -> None:
         run_kind = config.get("run_kind", "train")
         if run_kind == "benchmark":
             benchmark_experiment(config)
+        elif run_kind == "finetune_mc":
+            finetune_experiment(config, resume=args.resume)
         else:
             train_experiment(config, resume=args.resume)
 

@@ -97,29 +97,63 @@ def compute_directional_sharpness(
     batch: dict[str, torch.Tensor],
     device: torch.device,
     precision: str,
+    optimizer: TraceableOptimizer | None = None,
 ) -> float:
     del precision
     model.eval()
     model.zero_grad(set_to_none=True)
     params = [param for param in model.parameters() if param.requires_grad]
-    loss = model(**batch)["loss"]
-    grads = torch.autograd.grad(loss, params, create_graph=True)
-    flat_grad = _flatten_tensors([grad.float() for grad in grads])
-    direction = flat_grad / (flat_grad.norm() + 1e-12)
+    toggled_modules: list[torch.nn.Module] = []
+    for module in model.modules():
+        if hasattr(module, "force_eager_attention"):
+            setattr(module, "force_eager_attention", True)
+            toggled_modules.append(module)
+    try:
+        loss = model(**batch)["loss"]
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        if optimizer is not None:
+            direction_tensors = optimizer.predicted_update_tensors(params, [grad.detach() for grad in grads])
+        else:
+            direction_tensors = [grad.detach().float() for grad in grads]
+        flat_direction = _flatten_tensors([direction.float() for direction in direction_tensors])
+        direction_norm = flat_direction.norm()
+        if not torch.isfinite(direction_norm) or float(direction_norm.item()) == 0.0:
+            model.zero_grad(set_to_none=True)
+            return 0.0
+        direction = (flat_direction / direction_norm).detach()
 
-    start = 0
-    directional_grad = 0.0
-    for grad in grads:
-        numel = grad.numel()
-        directional_grad = directional_grad + (
-            grad.reshape(-1).float() * direction[start : start + numel]
-        ).sum()
-        start += numel
-    hvps = torch.autograd.grad(directional_grad, params, retain_graph=False)
-    flat_hvp = _flatten_tensors([hvp.float() for hvp in hvps])
-    sharpness = torch.dot(direction, flat_hvp).item()
-    model.zero_grad(set_to_none=True)
-    return float(sharpness)
+        start = 0
+        directional_grad = torch.zeros((), device=device, dtype=torch.float32)
+        for grad in grads:
+            numel = grad.numel()
+            directional_grad = directional_grad + (
+                grad.reshape(-1).float() * direction[start : start + numel]
+            ).sum()
+            start += numel
+        hvps = torch.autograd.grad(directional_grad, params, retain_graph=False)
+        flat_hvp = _flatten_tensors([hvp.float() for hvp in hvps])
+        sharpness = torch.dot(direction, flat_hvp).item()
+        model.zero_grad(set_to_none=True)
+        return float(sharpness)
+    finally:
+        for module in toggled_modules:
+            setattr(module, "force_eager_attention", False)
+
+
+def _save_analysis_checkpoint(
+    output_dir: Path,
+    step: int,
+    model: torch.nn.Module,
+    optimizer: TraceableOptimizer,
+) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": step,
+        },
+        output_dir / f"analysis_step_{step}.pt",
+    )
 
 
 def profile_memory_breakdown(
@@ -138,18 +172,43 @@ def profile_memory_breakdown(
             "peak_memory_gb": 0.0,
         }
 
-    optimizer.zero_grad(set_to_none=True)
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
     weights_bytes = sum(tensor_bytes(param) for param in model.parameters())
+
+    # Prime optimizer states once so Adam/APOLLO-like optimizers materialize their
+    # persistent buffers before the staged measurement below.
+    if optimizer_state_bytes(optimizer) == 0:
+        optimizer.zero_grad(set_to_none=True)
+        with _autocast_context(device, precision):
+            prime_loss = model(**batch)["loss"]
+        prime_loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    _sync(device)
+    torch.cuda.reset_peak_memory_stats(device)
+
+    opt_state_bytes = optimizer_state_bytes(optimizer)
+    optimizer.zero_grad(set_to_none=True)
+    _sync(device)
+    baseline_bytes = torch.cuda.memory_allocated(device)
+
     with _autocast_context(device, precision):
         loss = model(**batch)["loss"]
+    _sync(device)
+    forward_live_bytes = torch.cuda.memory_allocated(device)
+    activations_bytes = max(0, forward_live_bytes - baseline_bytes)
+
     loss.backward()
-    optimizer.step()
+    _sync(device)
     grads_bytes = sum(tensor_bytes(param.grad) for param in model.parameters() if param.grad is not None)
-    opt_state_bytes = optimizer_state_bytes(optimizer)
+
+    optimizer.step()
+    _sync(device)
     peak_bytes = torch.cuda.max_memory_allocated(device)
-    activations_bytes = max(0, peak_bytes - weights_bytes - grads_bytes - opt_state_bytes)
+    optimizer.zero_grad(set_to_none=True)
+
     return {
         "weights_gb": bytes_to_gb(weights_bytes),
         "gradients_gb": bytes_to_gb(grads_bytes),
@@ -299,7 +358,7 @@ def train_experiment(config: dict[str, Any], resume: str | None = None) -> dict[
         if analysis_cfg.get("enable_sharpness_online", False) and step in set(analysis_cfg.get("sharpness_steps", [])):
             sharpness_batch = next(train_iterator)
             sharpness_batch = {key: value.to(device) for key, value in sharpness_batch.items()}
-            sharpness = compute_directional_sharpness(model, sharpness_batch, device, precision)
+            sharpness = compute_directional_sharpness(model, sharpness_batch, device, precision, optimizer=optimizer)
             append_jsonl(sharpness_path, {"step": step, "sharpness": sharpness})
 
         if step % train_cfg["log_interval"] == 0 or step == 1:
@@ -329,7 +388,7 @@ def train_experiment(config: dict[str, Any], resume: str | None = None) -> dict[
                 torch.save(model.state_dict(), output_dir / "best_model.pt")
 
         if step in set(train_cfg.get("save_analysis_steps", [])):
-            torch.save(model.state_dict(), output_dir / f"analysis_step_{step}.pt")
+            _save_analysis_checkpoint(output_dir, step, model, optimizer)
 
         if step % train_cfg["save_interval"] == 0 or step == train_cfg["max_steps"]:
             torch.save(

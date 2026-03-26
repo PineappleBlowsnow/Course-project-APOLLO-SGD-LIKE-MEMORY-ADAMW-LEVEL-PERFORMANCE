@@ -1,0 +1,47 @@
+suite_name: finetune
+shared_config: configs/base_llama60_finetune.yaml
+
+experiments:
+  - name: arc_easy_adamw
+    overrides:
+      task:
+        name: arc_easy
+        dataset_name: allenai/ai2_arc
+        config_name: ARC-Easy
+      optimizer:
+        name: adamw
+
+  - name: arc_easy_apollo_mini
+    overrides:
+      task:
+        name: arc_easy
+        dataset_name: allenai/ai2_arc
+        config_name: ARC-Easy
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        projection: random
+        scale: 128.0
+
+  - name: arc_challenge_adamw
+    overrides:
+      task:
+        name: arc_challenge
+        dataset_name: allenai/ai2_arc
+        config_name: ARC-Challenge
+      optimizer:
+        name: adamw
+
+  - name: arc_challenge_apollo_mini
+    overrides:
+      task:
+        name: arc_challenge
+        dataset_name: allenai/ai2_arc
+        config_name: ARC-Challenge
+      optimizer:
+        name: apollo_mini
+        rank: 1
+        granularity: tensor
+        projection: random
+        scale: 128.0

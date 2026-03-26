@@ -3,34 +3,34 @@
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
 \citation{kingma2014adam}
-\citation{loshchilov2019decoupled}
-\citation{zhang2024transformers}
-\citation{apollo2025}
-\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Why optimizer memory matters.}{1}{section*.1}\protected@file@percent }
 \citation{apollo2025}
 \citation{apollo2025}
-\citation{zhang2024adammini}
-\citation{zhang2024transformers}
 \citation{apollo2025}
-\@writefile{toc}{\contentsline {paragraph}{From element-wise scaling to structured scaling.}{2}{section*.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Is structured scaling already enough?}{2}{section*.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Why structured updates alone do not save memory.}{2}{section*.4}\protected@file@percent }
-\citation{zhao2024galore}
-\citation{chen2024fira}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Motivation}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Methodology}{1}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Why pre-training from scratch?}{1}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Experimental matrix.}{1}{section*.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Training loss on LLaMA-60M + TinyStories. APOLLO rank-$1/4$ and rank-$1/8$ remain stable and follow AdamW qualitatively, while APOLLO-Mini exhibits large early spikes and never recovers fully.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:llama-convergence}{{1}{2}{Training loss on LLaMA-60M + TinyStories. APOLLO rank-$1/4$ and rank-$1/8$ remain stable and follow AdamW qualitatively, while APOLLO-Mini exhibits large early spikes and never recovers fully}{figure.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Exp.~1 summary. Perplexities come from the TinyStories LLaMA-60M runs. Memory is reported as \emph  {normalized optimizer-state memory}, not peak GPU memory; this matches the paper's Table 2 logic better than our early benchmark plots.}}{2}{table.1}\protected@file@percent }
+\newlabel{tab:llama-success}{{1}{2}{Exp.~1 summary. Perplexities come from the TinyStories LLaMA-60M runs. Memory is reported as \emph {normalized optimizer-state memory}, not peak GPU memory; this matches the paper's Table 2 logic better than our early benchmark plots}{table.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Metrics.}{2}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Results}{2}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Exp.~1: LLaMA-60M + TinyStories is a partial success}{2}{subsection.3.1}\protected@file@percent }
 \citation{apollo2025}
-\citation{apollo2025}
-\@writefile{toc}{\contentsline {paragraph}{From structured scaling to low-rank subspace updates.}{3}{section*.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Why random projection should still work.}{3}{section*.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Our claim in a reduced setting.}{3}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}APOLLO-Mini fails in the same LLaMA setting}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Exp.~2: NanoGPT-40M + TinyStories breaks the main claim}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Exp.~3: NanoGPT-130M + WikiText is even less favorable}{3}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Diagnostics we explicitly \emph  {do not} promote to headline evidence}{3}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{3}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Why might LLaMA help APOLLO while NanoGPT hurts it?}{3}{section*.4}\protected@file@percent }
 \bibcite{kingma2014adam}{1}
-\bibcite{loshchilov2019decoupled}{2}
-\bibcite{zhang2024transformers}{3}
-\bibcite{zhang2024adammini}{4}
-\bibcite{zhao2024galore}{5}
-\bibcite{chen2024fira}{6}
-\bibcite{apollo2025}{7}
-\@writefile{toc}{\contentsline {section}{\numberline {2}Experimental Setup}{4}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {3}Results}{4}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{4}{section.4}\protected@file@percent }
-\gdef \@abspage@last{4}
+\@writefile{toc}{\contentsline {paragraph}{Why structured scaling alone is not enough.}{4}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Connection to the course.}{4}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Quick Experiments That Would Most Improve the Story}{4}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{4}{section.6}\protected@file@percent }
+\bibcite{zhang2024transformers}{2}
+\bibcite{zhang2024adammini}{3}
+\bibcite{zhao2024galore}{4}
+\bibcite{apollo2025}{5}
+\gdef \@abspage@last{5}
