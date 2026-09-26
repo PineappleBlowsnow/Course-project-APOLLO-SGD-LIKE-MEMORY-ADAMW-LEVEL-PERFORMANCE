@@ -1,0 +1,26 @@
+{
+  "prepared_on": "2026-09-26",
+  "experiment": "LLaMA-style 60M pretraining on TinyStories",
+  "source_group": "Experiment1_pretraining _llama60M_TinyStories/pretraining_llama60/figures-adamW vs apollo 1-4 vs apollo 1-8",
+  "copy_policy": "Original CSV bytes preserved; no metric rows or column names changed.",
+  "files": [
+    {
+      "file": "optimizer_memory.csv",
+      "sha256": "f2deff7ad737d9a3ce84c6186a8bc49c29224883052b85b977450d7434bc3f9a",
+      "role": "Optimizer-state byte counts and checkpoint steps",
+      "unit_note": "optimizer_state_gb is bytes / 1024**3, hence GiB."
+    },
+    {
+      "file": "table2_like.csv",
+      "sha256": "e512d5abde4c4ed2c5f8f435700b6a0490b0a34c6ad7b99348cb73b69faef048",
+      "role": "Archived validation summaries",
+      "measurement_note": "best_eval_perplexity is the best validation value per run. peak_memory_gb is retained but not used for a matched total-memory claim."
+    }
+  ],
+  "validation": {
+    "static_checks": ["CSV schemas", "SHA-256 match to source", "step labels", "GiB conversion", "reduction arithmetic", "document links"],
+    "training_rerun": false,
+    "gpu_benchmark_rerun": false,
+    "smoke_test_rerun": false
+  }
+}

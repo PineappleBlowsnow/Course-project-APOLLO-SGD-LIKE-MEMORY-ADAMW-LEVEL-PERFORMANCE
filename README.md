@@ -1,10 +1,20 @@
-# APOLLO Paper Reproduction
+# APOLLO: Optimizer Memory and Convergence in Small Language Models
 
 This repository contains the training, benchmarking, plotting, and analysis code used to evaluate the claim that Approximated Gradient Scaling for Memory Efficient LLM Optimization (APOLLO) achieves AdamW-level performance with lower memory usage. The original paper is: https://arxiv.org/pdf/2412.05270. 
 
+An MVA course reproduction and experimental study by **Ying Jin**, who carried out the implementation and experiments presented here. The [submitted course report](report/Apollo_report.pdf) also credits Felipe Vicentin; its original author list is preserved. APOLLO is an existing optimization method, evaluated here at a smaller model scale.
+
+## Selected result: memory saved, convergence trade-off retained
+
+In the archived **LLaMA-style 60M / TinyStories, 10,000-step** experiments, the rank-1/8 variant used **0.0541 GiB of optimizer state versus 0.4327 GiB for AdamW**, a reduction of approximately **87.5%**. Its best validation perplexity was **4.13 versus 3.61** for AdamW. This demonstrates a memory/convergence trade-off in these runs; it does not establish equal model quality or an 87.5% reduction in total GPU memory.
+
+The [results and evidence guide](docs/RESULTS.md) links the original CSV exports, defines the measurements, and explains their limits. These are historical experiment results; this documentation update did not rerun training. The code covers optimizer implementations, training and resume support, memory/step-time diagnostics, and plotting. The ARC finetuning workflow is included as code only and was **not run** for the submitted study.
+
+## Experiment scope
+
 The current default setup is centered on small LLaMA-style models:
 
-- pretraining: `LLaMA-60M` on `TinyStories`; `nanoGPT 40M` on `TinyStories`; `nanoGPT 130M` on `WikiText`. 
+- pretraining: `LLaMA-60M` on `TinyStories`; `nanoGPT 40M` on `TinyStories`; `nanoGPT 130M` on `WikiText`.
 - optimizer diagnostics: scaling traces, memory profiling, step-time profiling, and directional sharpness
 - finetuning: `LLaMA-60M` on `ARC-Easy` / `ARC-Challenge` (We didn't conduct finetuning experiments)
 
@@ -104,7 +114,7 @@ python scripts/run_suite.py --suite configs/suites/finetune_llama60_arc.yaml --o
 python scripts/make_plots.py --results-root results/finetune_llama60_arc
 ```
 
-This runs ARC-Easy / ARC-Challenge finetuning for `adamw` and `apollo_mini`.
+This command is intended to run ARC-Easy / ARC-Challenge finetuning for `adamw` and `apollo_mini`. It is an unexecuted workflow in this study, not a reported finetuning result.
 
 ## Resume Support
 
